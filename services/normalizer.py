@@ -34,8 +34,7 @@ class Normalizer:
         df['descripcion_movimiento'] = df['descripcion_movimiento'].replace('', None)
         df['descripcion_asiento'] = df['descripcion_asiento'].replace('', None)
         
-        # Convertir 0 a None en campos numéricos opcionales
-        df['tipo_subcta'] = df['tipo_subcta'].replace(0, None)
+        # Convertir 0 a None en campos numéricos opcionales (sin tipo_subcta)
         df['nro_subcuenta'] = df['nro_subcuenta'].replace(0, None)
         df['tipo_comprobante'] = df['tipo_comprobante'].replace(0, None)
         df['sucursal'] = df['sucursal'].replace(0, None)
@@ -51,7 +50,6 @@ class Normalizer:
             'codigo_cuenta',
             'descripcion_cuenta',
             'descripcion_movimiento',
-            'tipo_subcta',
             'nro_subcuenta',
             'tipo_comprobante',
             'sucursal',
@@ -70,16 +68,7 @@ class Normalizer:
     
     @staticmethod
     def preparar_batch(df: pd.DataFrame, batch_size: int = 1000) -> list:
-        """
-        Dividir DataFrame en lotes para inserción
-        
-        Args:
-            df: DataFrame a dividir
-            batch_size: Tamaño de cada lote
-            
-        Returns:
-            Lista de DataFrames
-        """
+        """Dividir DataFrame en lotes para inserción"""
         batches = []
         total_rows = len(df)
         
@@ -91,17 +80,6 @@ class Normalizer:
     
     @staticmethod
     def convertir_a_dict(df: pd.DataFrame) -> list:
-        """
-        Convertir DataFrame a lista de diccionarios para inserción
-        
-        Args:
-            df: DataFrame a convertir
-            
-        Returns:
-            Lista de diccionarios
-        """
-        # Convertir NaT y NaN a None
+        """Convertir DataFrame a lista de diccionarios para inserción"""
         df = df.where(pd.notna(df), None)
-        
-        # Convertir a lista de diccionarios
         return df.to_dict('records')
