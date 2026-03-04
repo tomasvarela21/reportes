@@ -1,14 +1,11 @@
 import os, streamlit as st, pandas as pd
 from dotenv import load_dotenv
 from services.db import get_conn
+from services.styles import apply_styles
 load_dotenv()
 
 st.set_page_config(page_title="Administración · ReporteApp", page_icon="⚙️", layout="wide")
-st.markdown("""<style>
-[data-testid="stSidebar"]{background:#1a1f2e}
-[data-testid="stSidebar"] *{color:#e0e4ef!important}
-h1,h2,h3{color:#1a1f2e} #MainMenu{visibility:hidden} footer{visibility:hidden}
-</style>""", unsafe_allow_html=True)
+apply_styles()
 
 def ejecutar_con_reconexion(fn, *args):
     conn = get_conn()

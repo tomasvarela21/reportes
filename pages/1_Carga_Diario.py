@@ -4,6 +4,7 @@ pages/1_Carga_Diario.py
 import os, sys, streamlit as st, pandas as pd
 from dotenv import load_dotenv
 from services.db import get_conn
+from services.styles import apply_styles
 load_dotenv()
 
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'services'))
@@ -12,10 +13,7 @@ from validator import Validator             # type: ignore
 from staging_service import StagingService  # type: ignore
 
 st.set_page_config(page_title="Carga Diario · ReporteApp", page_icon="📤", layout="wide")
-st.markdown("""<style>
-[data-testid="stSidebar"]{background:#1a1f2e}
-[data-testid="stSidebar"] *{color:#e0e4ef!important}
-h1,h2,h3{color:#1a1f2e} #MainMenu{visibility:hidden} footer{visibility:hidden}
+apply_styles(extra_css="""
 .step-bar{display:flex;gap:8px;margin-bottom:28px}
 .step{flex:1;padding:10px 8px;border-radius:8px;text-align:center;font-size:.8rem;
       font-weight:600;border:2px solid #e5e7eb;color:#9ca3af;background:#f9fafb}
@@ -28,7 +26,7 @@ h1,h2,h3{color:#1a1f2e} #MainMenu{visibility:hidden} footer{visibility:hidden}
     padding:8px 14px;color:#1e40af;font-size:.85rem;margin-bottom:8px}
 .modal-warning{background:#fff7ed;border:2px solid #f97316;border-radius:12px;
     padding:20px 24px;margin:16px 0}
-</style>""", unsafe_allow_html=True)
+""")
 
 EMPRESAS = ["BATIA","GUARE","NORFORK","TORRES","WERCOLICH"]
 MESES = {1:"Enero",2:"Febrero",3:"Marzo",4:"Abril",5:"Mayo",6:"Junio",
