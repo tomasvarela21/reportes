@@ -2,7 +2,7 @@
 Home.py — ReporteApp v2
 """
 import streamlit as st
-from services.styles import apply_styles
+from services.styles import apply_styles, render_sidebar
 
 st.set_page_config(
     page_title="ReporteApp",
@@ -12,21 +12,7 @@ st.set_page_config(
 )
 
 apply_styles()
-
-with st.sidebar:
-    st.markdown("## 📊 ReporteApp")
-    st.markdown("**v2.0** · Grupo Corporativo")
-    st.divider()
-    st.markdown("""
-    **Empresas activas:**
-    - BATIA
-    - GUARE
-    - NORFORK
-    - TORRES
-    - WERCOLICH
-    """)
-    st.divider()
-    st.caption("Navegá desde el menú lateral")
+render_sidebar()
 
 st.title("📊 ReporteApp")
 st.markdown("### Sistema de Contabilidad Multi-Empresa")
