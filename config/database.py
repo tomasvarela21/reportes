@@ -4,7 +4,7 @@ Configuración de conexión a la base de datos Neon PostgreSQL
 import os
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import NullPool
+from sqlalchemy.pool import QueuePool
 from dotenv import load_dotenv
 
 # Cargar variables de entorno
@@ -18,10 +18,18 @@ class DatabaseConfig:
         if not self.database_url:
             raise ValueError("DATABASE_URL no está configurado en el archivo .env")
         
-        # Crear engine con pool de conexiones
+        # Crear engine con pool de conexiones optimizado para Neon
         self.engine = create_engine(
             self.database_url,
-            poolclass=NullPool,  # Neon maneja el pooling
+            poolclass=QueuePool,
+            pool_size=5,
+            max_overflow=10,
+            pool_pre_ping=True,
+            pool_recycle=3600,
+            connect_args={
+                'connect_timeout': 10,
+                'application_name': 'reportes_app'
+            },
             echo=os.getenv('DEBUG', 'False') == 'True'
         )
         

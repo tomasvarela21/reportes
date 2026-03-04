@@ -1,92 +1,88 @@
 """
-Script para dividir el archivo anual del libro diario en archivos mensuales
+Script para dividir el archivo anual del libro diario en archivos mensuales.
+Maneja correctamente archivos que contienen datos de múltiples años (ej: Norfork).
 """
 import pandas as pd
 import os
-from datetime import datetime
+import sys
 
 
-def dividir_por_mes(archivo_anual: str, codigo_empresa: str = 'EMPRESA_A'):
+def dividir_por_mes(archivo_anual: str, codigo_empresa: str = 'EMPRESA'):
     """
-    Dividir archivo anual en archivos mensuales
-    
-    Args:
-        archivo_anual: Ruta al archivo CSV anual
-        codigo_empresa: Código de la empresa para nombrar los archivos
+    Dividir un archivo CSV anual en archivos mensuales.
+
+    El nombre de salida sigue el formato esperado por el sistema:
+        diario_EMPRESA_MM-YYYY.csv
+
+    Si el archivo contiene datos de múltiples años (ej: Norfork 2023+2024),
+    genera archivos separados por cada combinación mes/año.
     """
-    
-    print("📖 Leyendo archivo anual...")
-    
-    # Leer el CSV
+    if not os.path.exists(archivo_anual):
+        print(f"❌ Error: El archivo '{archivo_anual}' no existe")
+        sys.exit(1)
+
+    print(f"{'='*60}")
+    print(f"DIVISIÓN DE ARCHIVO POR MES")
+    print(f"{'='*60}")
+    print(f"📁 Archivo : {archivo_anual}")
+    print(f"🏢 Empresa : {codigo_empresa}")
+    print(f"{'='*60}\n")
+
+    print("📖 Leyendo archivo...")
     df = pd.read_csv(archivo_anual, sep=';', encoding='latin1')
-    
-    print(f"✅ Leídos {len(df)} registros\n")
-    
-    # Convertir la columna de fecha
-    df['Fecasi'] = pd.to_datetime(df['Fecasi'], format='%d/%m/%Y')
-    
-    # Extraer mes y año
-    df['mes'] = df['Fecasi'].dt.month
-    df['anio'] = df['Fecasi'].dt.year
-    
-    # Obtener el año (debería ser 2025 según tu archivo)
-    anio = df['anio'].iloc[0]
-    
-    # Crear carpeta para los archivos
+    print(f"✅ {len(df):,} registros leídos\n")
+
+    # Parsear fecha — formato D/M/YYYY
+    df['_fecha'] = pd.to_datetime(df['Fecasi'], format='%d/%m/%Y', dayfirst=True, errors='coerce')
+
+    nulas = df['_fecha'].isna().sum()
+    if nulas > 0:
+        print(f"⚠️  {nulas} registros con fecha inválida — se omitirán\n")
+
+    df = df.dropna(subset=['_fecha'])
+    df['_mes']  = df['_fecha'].dt.month
+    df['_anio'] = df['_fecha'].dt.year
+
+    # Resumen de distribución
+    periodos = df.groupby(['_anio', '_mes']).size().reset_index(name='registros')
+    print(f"📊 Distribución de períodos encontrados:")
+    for _, row in periodos.iterrows():
+        print(f"   {row['_mes']:02d}/{row['_anio']}: {row['registros']:,} registros")
+    print()
+
+    # Crear carpeta de salida
     carpeta_salida = 'archivos_mensuales'
     os.makedirs(carpeta_salida, exist_ok=True)
-    
-    print(f"📊 Dividiendo por mes...\n")
-    
-    # Dividir por mes
-    for mes in range(1, 13):
-        df_mes = df[df['mes'] == mes].copy()
-        
-        if len(df_mes) == 0:
-            print(f"   ⚠️  Mes {mes:02d}: Sin datos")
-            continue
-        
-        # Eliminar las columnas auxiliares
-        df_mes = df_mes.drop(['mes', 'anio'], axis=1)
-        
-        # Nombre del archivo de salida
+
+    archivos_generados = 0
+
+    for _, periodo in periodos.iterrows():
+        anio = int(periodo['_anio'])
+        mes  = int(periodo['_mes'])
+
+        df_mes = df[(df['_mes'] == mes) & (df['_anio'] == anio)].copy()
+        df_mes = df_mes.drop(columns=['_fecha', '_mes', '_anio'])
+
         nombre_archivo = f"diario_{codigo_empresa}_{mes:02d}-{anio}.csv"
-        ruta_salida = os.path.join(carpeta_salida, nombre_archivo)
-        
-        # Guardar CSV
+        ruta_salida    = os.path.join(carpeta_salida, nombre_archivo)
+
         df_mes.to_csv(ruta_salida, sep=';', encoding='latin1', index=False)
-        
-        print(f"   ✅ Mes {mes:02d}/{anio}: {len(df_mes):,} registros → {nombre_archivo}")
-    
+
+        print(f"✅ {nombre_archivo}: {len(df_mes):,} registros")
+        archivos_generados += 1
+
     print(f"\n{'='*60}")
-    print(f"✅ COMPLETADO")
+    print(f"✅ COMPLETADO — {archivos_generados} archivos generados")
+    print(f"📁 Carpeta: {os.path.abspath(carpeta_salida)}")
     print(f"{'='*60}")
-    print(f"📁 Archivos guardados en: {os.path.abspath(carpeta_salida)}")
-    print(f"📊 Total de archivos generados: {len([f for f in os.listdir(carpeta_salida) if f.endswith('.csv')])}")
 
 
 if __name__ == "__main__":
-    import sys
-    
-    if len(sys.argv) < 2:
-        print("Uso: python dividir_por_mes.py <archivo_anual.csv> [CODIGO_EMPRESA]")
+    if len(sys.argv) < 3:
+        print("Uso: python dividir_por_mes.py <archivo.csv> <CODIGO_EMPRESA>")
         print("\nEjemplo:")
-        print("  python scripts/dividir_por_mes.py reporte_diario_operativo__1_.CSV EMPRESA_A")
-        print("\nSi no especificas CODIGO_EMPRESA, se usará 'EMPRESA_A' por defecto")
+        print("  python dividir_por_mes.py Norfork_2024.CSV NORFORK")
+        print("  python dividir_por_mes.py Guare_2024.CSV GUARE")
         sys.exit(1)
-    
-    archivo = sys.argv[1]
-    empresa = sys.argv[2] if len(sys.argv) > 2 else 'EMPRESA_A'
-    
-    if not os.path.exists(archivo):
-        print(f"❌ Error: El archivo {archivo} no existe")
-        sys.exit(1)
-    
-    print("="*60)
-    print("DIVISIÓN DE ARCHIVO ANUAL POR MESES")
-    print("="*60)
-    print(f"📁 Archivo: {archivo}")
-    print(f"🏢 Empresa: {empresa}")
-    print("="*60 + "\n")
-    
-    dividir_por_mes(archivo, empresa)
+
+    dividir_por_mes(sys.argv[1], sys.argv[2].upper())
