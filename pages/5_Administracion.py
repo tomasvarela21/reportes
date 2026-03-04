@@ -1,11 +1,12 @@
 import os, streamlit as st, pandas as pd
 from dotenv import load_dotenv
 from services.db import get_conn
-from services.styles import apply_styles
+from services.styles import apply_styles, render_sidebar
 load_dotenv()
 
 st.set_page_config(page_title="Administración · ReporteApp", page_icon="⚙️", layout="wide")
 apply_styles()
+render_sidebar()
 
 def ejecutar_con_reconexion(fn, *args):
     conn = get_conn()
@@ -46,34 +47,28 @@ st.caption("Gestión de maestros y operaciones administrativas.")
 st.divider()
 
 conn = get_conn()
-if conn is None:
-    st.stop()
+if conn is None: st.stop()
 
 tab1, tab2, tab3 = st.tabs(["🏢 Empresas", "🏷️ Centros de Costo", "📋 Log de recálculos"])
 
-# ── Tab 1: Empresas ───────────────────────────────────────────────────────────
 with tab1:
     df_emp = ejecutar_con_reconexion(get_empresas)
     if df_emp is None: st.stop()
     st.dataframe(df_emp, use_container_width=True, hide_index=True)
 
-# ── Tab 2: Centros de Costo ───────────────────────────────────────────────────
 with tab2:
     st.markdown("**Cargar maestro de centros de costo (CSV):**")
     st.code("codigo;descripcion;empresa")
     st.caption("La columna 'empresa' puede estar vacía para centros compartidos.")
     archivo_cc = st.file_uploader("CSV centros de costo", type=["csv"], key="cc_upload")
-
     if archivo_cc:
         df_cc = pd.read_csv(archivo_cc, sep=';', dtype=str, keep_default_na=False)
         df_cc.columns = [c.strip().lower() for c in df_cc.columns]
         st.dataframe(df_cc.head(20), use_container_width=True, hide_index=True)
-
         if st.button("💾 Cargar centros de costo", type="primary"):
             conn = get_conn()
             if conn is None: st.stop()
-            cur = conn.cursor()
-            ok_count = 0
+            cur = conn.cursor(); ok_count = 0
             try:
                 for _, row in df_cc.iterrows():
                     cur.execute("""
@@ -82,20 +77,15 @@ with tab2:
                         ON CONFLICT (codigo) DO UPDATE
                             SET descripcion = EXCLUDED.descripcion,
                                 empresa     = EXCLUDED.empresa
-                    """, (
-                        str(row['codigo']).strip(),
-                        str(row.get('descripcion','')).strip(),
-                        str(row.get('empresa','')).strip() or None,
-                    ))
+                    """, (str(row['codigo']).strip(), str(row.get('descripcion','')).strip(),
+                          str(row.get('empresa','')).strip() or None))
                     ok_count += 1
                 conn.commit()
                 st.success(f"✅ {ok_count} centros de costo cargados/actualizados.")
             except Exception as e:
-                conn.rollback()
-                st.error(f"Error: {e}")
+                conn.rollback(); st.error(f"Error: {e}")
             finally:
                 cur.close()
-
     st.divider()
     df_cc_db = ejecutar_con_reconexion(get_centros)
     if df_cc_db is None: st.stop()
@@ -104,7 +94,6 @@ with tab2:
     else:
         st.info("No hay centros de costo cargados todavía.")
 
-# ── Tab 3: Log de recálculos ──────────────────────────────────────────────────
 with tab3:
     df_log = ejecutar_con_reconexion(get_log)
     if df_log is None: st.stop()

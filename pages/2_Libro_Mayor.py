@@ -1,12 +1,12 @@
 import os, streamlit as st, pandas as pd
 from dotenv import load_dotenv
 from services.db import get_conn
-from services.styles import apply_styles
+from services.styles import apply_styles, render_sidebar
 load_dotenv()
 
 st.set_page_config(page_title="Libro Mayor · ReporteApp", page_icon="📚", layout="wide")
-
 apply_styles()
+render_sidebar()
 
 EMPRESAS = ["BATIA","GUARE","NORFORK","TORRES","WERCOLICH"]
 MESES = {1:"Enero",2:"Febrero",3:"Marzo",4:"Abril",5:"Mayo",6:"Junio",
@@ -35,16 +35,13 @@ def get_mayor(conn, empresa, anio, mes, nivel, cuenta_filtro, cc_filtro):
     df = pd.DataFrame(cur.fetchall(), columns=cols); cur.close(); return df
 
 def ejecutar_con_reconexion(fn, *args):
-    """Ejecuta fn(conn, *args) reconectando una vez si la conexión está caída."""
     conn = get_conn()
-    if conn is None:
-        return None
+    if conn is None: return None
     try:
         return fn(conn, *args)
     except Exception:
         conn = get_conn()
-        if conn is None:
-            return None
+        if conn is None: return None
         return fn(conn, *args)
 
 st.title("📚 Libro Mayor")
@@ -52,14 +49,12 @@ st.caption("Saldos acumulados por empresa, período, cuenta y centro de costo.")
 st.divider()
 
 conn = get_conn()
-if conn is None:
-    st.stop()
+if conn is None: st.stop()
 
 c1,c2,c3,c4,c5 = st.columns(5)
 empresa = c1.selectbox("Empresa", EMPRESAS)
 periodos = ejecutar_con_reconexion(get_periodos, empresa)
-if periodos is None:
-    st.stop()
+if periodos is None: st.stop()
 if not periodos:
     st.info(f"No hay datos para **{empresa}**."); st.stop()
 opciones = [f"{MESES[m]} {a}" for a,m in periodos]
@@ -72,8 +67,7 @@ cc_filtro = c5.text_input("Centro costo", placeholder="ej: 1101").strip() or Non
 
 st.divider()
 df = ejecutar_con_reconexion(get_mayor, empresa, anio, mes, nivel, cuenta_filtro, cc_filtro)
-if df is None:
-    st.stop()
+if df is None: st.stop()
 if df.empty:
     st.info("Sin registros con esos filtros."); st.stop()
 

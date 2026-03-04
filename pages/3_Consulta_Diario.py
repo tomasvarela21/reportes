@@ -1,11 +1,12 @@
 import os, streamlit as st, pandas as pd
 from dotenv import load_dotenv
 from services.db import get_conn
-from services.styles import apply_styles
+from services.styles import apply_styles, render_sidebar
 load_dotenv()
 
 st.set_page_config(page_title="Consulta Diario · ReporteApp", page_icon="📋", layout="wide")
 apply_styles()
+render_sidebar()
 
 EMPRESAS = ["BATIA","GUARE","NORFORK","TORRES","WERCOLICH"]
 MESES = {1:"Enero",2:"Febrero",3:"Marzo",4:"Abril",5:"Mayo",6:"Junio",
@@ -13,14 +14,12 @@ MESES = {1:"Enero",2:"Febrero",3:"Marzo",4:"Abril",5:"Mayo",6:"Junio",
 
 def ejecutar_con_reconexion(fn, *args):
     conn = get_conn()
-    if conn is None:
-        return None
+    if conn is None: return None
     try:
         return fn(conn, *args)
     except Exception:
         conn = get_conn()
-        if conn is None:
-            return None
+        if conn is None: return None
         return fn(conn, *args)
 
 def get_diario(conn, filtros, params):
@@ -38,17 +37,14 @@ def get_diario(conn, filtros, params):
     """, params)
     cols = ['Empresa','Fecha','Año','Mes','Nro Asiento','Cuenta','Nombre Cuenta',
             'Debe','Haber','Descripción','Tipo Subcta','Nro Subcta','Centro Costo']
-    df = pd.DataFrame(cur.fetchall(), columns=cols)
-    cur.close()
-    return df
+    df = pd.DataFrame(cur.fetchall(), columns=cols); cur.close(); return df
 
 st.title("📋 Consulta de Libro Diario")
 st.caption("Consultá los asientos cargados con filtros por empresa, período y cuenta.")
 st.divider()
 
 conn = get_conn()
-if conn is None:
-    st.stop()
+if conn is None: st.stop()
 
 c1,c2,c3,c4 = st.columns(4)
 empresa    = c1.selectbox("Empresa", ["Todas"] + EMPRESAS)
@@ -57,8 +53,7 @@ mes_sel    = c3.selectbox("Mes", ["Todos"] + list(MESES.values()))
 cuenta_raw = c4.text_input("Cuenta", placeholder="ej: 38")
 cuenta_filtro = int(cuenta_raw) if cuenta_raw.strip().isdigit() else None
 
-filtros = ["periodo_anio = %s"]
-params  = [anio]
+filtros = ["periodo_anio = %s"]; params = [anio]
 if empresa != "Todas":  filtros.append("empresa = %s");      params.append(empresa)
 if mes_sel != "Todos":
     mes_num = [k for k,v in MESES.items() if v == mes_sel][0]
@@ -67,8 +62,7 @@ if cuenta_filtro:       filtros.append("cuenta_codigo = %s"); params.append(cuen
 
 st.divider()
 df = ejecutar_con_reconexion(get_diario, filtros, params)
-if df is None:
-    st.stop()
+if df is None: st.stop()
 if df.empty:
     st.info("Sin registros con esos filtros."); st.stop()
 

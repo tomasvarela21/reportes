@@ -4,7 +4,7 @@ pages/1_Carga_Diario.py
 import os, sys, streamlit as st, pandas as pd
 from dotenv import load_dotenv
 from services.db import get_conn
-from services.styles import apply_styles
+from services.styles import apply_styles, render_sidebar
 load_dotenv()
 
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'services'))
@@ -27,6 +27,7 @@ apply_styles(extra_css="""
 .modal-warning{background:#fff7ed;border:2px solid #f97316;border-radius:12px;
     padding:20px 24px;margin:16px 0}
 """)
+render_sidebar()
 
 EMPRESAS = ["BATIA","GUARE","NORFORK","TORRES","WERCOLICH"]
 MESES = {1:"Enero",2:"Febrero",3:"Marzo",4:"Abril",5:"Mayo",6:"Junio",
@@ -66,10 +67,8 @@ step_bar(st.session_state.paso)
 # =============================================================================
 if st.session_state.paso == 1:
     st.subheader("Paso 1 · Seleccioná la empresa y el archivo")
-
     archivo = st.file_uploader("Archivo CSV del Libro Diario", type=["csv"],
                                 help="Separador punto y coma (;), encoding latin-1/cp1252")
-
     empresa_sugerida = None
     if archivo is not None:
         empresa_sugerida = FileParser.detectar_empresa(archivo.name)
@@ -77,11 +76,9 @@ if st.session_state.paso == 1:
             st.markdown(
                 f'<div class="empresa-detectada">💡 Empresa detectada del nombre del archivo: '
                 f'<strong>{empresa_sugerida}</strong></div>', unsafe_allow_html=True)
-
     idx_empresa = EMPRESAS.index(empresa_sugerida) if empresa_sugerida in EMPRESAS else 0
     empresa = st.selectbox("Empresa", EMPRESAS, index=idx_empresa,
                            help="Podés cambiar si la detección no fue correcta")
-
     if archivo:
         st.success(f"Archivo cargado: **{archivo.name}** ({archivo.size/1024:.1f} KB)")
         if st.button("Parsear archivo →", type="primary"):
@@ -103,7 +100,6 @@ elif st.session_state.paso == 2:
     result  = st.session_state.parse_result
     empresa = st.session_state.empresa_sel
     df      = result.dataframe
-
     st.subheader("Paso 2 · Preview del archivo")
     col1,col2,col3,col4 = st.columns(4)
     col1.metric("Empresa",       empresa)
@@ -118,7 +114,6 @@ elif st.session_state.paso == 2:
         "fecha": st.column_config.DateColumn("Fecha"),
     })
     for adv in result.advertencias: st.warning(f"⚠️ {adv}")
-
     col_back, col_next = st.columns([1,5])
     with col_back:
         if st.button("← Volver"): reset_estado(); st.rerun()
@@ -143,7 +138,6 @@ elif st.session_state.paso == 3:
     val     = st.session_state.val_result
     resumen = st.session_state.val_resumen
     empresa = st.session_state.empresa_sel
-
     st.subheader("Paso 3 · Resultado de validación")
     col1,col2,col3 = st.columns(3)
     col1.metric("Registros",   f"{resumen['total_registros']:,}")
@@ -163,7 +157,6 @@ elif st.session_state.paso == 3:
     if resumen['advertencias']:
         st.markdown("**Advertencias (no bloquean la carga):**")
         for adv in resumen['advertencias']: st.warning(f"⚠️ {adv}")
-
     col_back, col_next = st.columns([1,5])
     with col_back:
         if st.button("← Volver"): st.session_state.paso = 2; st.rerun()
@@ -188,14 +181,12 @@ elif st.session_state.paso == 4:
     empresa        = st.session_state.empresa_sel
     periodo_info   = st.session_state.periodo_info
     archivo_nombre = st.session_state.archivo_nombre
-
     st.subheader("Paso 4 · Confirmación")
     col1,col2,col3 = st.columns(3)
     col1.metric("Empresa",   empresa)
     col2.metric("Período",   f"{MESES.get(result.periodo_mes,'?')} {result.periodo_anio}")
     col3.metric("Registros", f"{result.total_filas_validas:,}")
     st.divider()
-
     if periodo_info.existe:
         st.markdown(f"""<div class="modal-warning">
             <div style="font-size:1.1rem;font-weight:700;color:#c2410c">⚠️ El período ya tiene datos cargados</div>
@@ -235,7 +226,6 @@ elif st.session_state.paso == 5:
     empresa        = st.session_state.empresa_sel
     archivo_nombre = st.session_state.archivo_nombre
     reemplazar     = st.session_state.get('reemplazar', False)
-
     st.subheader("Paso 5 · Procesando...")
     with st.spinner("Cargando datos y recalculando Libro Mayor..."):
         conn = get_conn()
