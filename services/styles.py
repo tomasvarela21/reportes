@@ -1,43 +1,30 @@
 """
 services/styles.py
-==================
-Estilos CSS globales para ReporteApp.
-Uso: from services.styles import apply_styles
 """
 import streamlit as st
 
 SIDEBAR_CSS = """
 [data-testid="stSidebar"] { background-color: #1a1f2e; }
 [data-testid="stSidebar"] * { color: #e0e4ef !important; }
-
-/* Ocultar el nav automático de páginas (el que hace el dropdown) */
 [data-testid="stSidebarNav"] { display: none !important; }
 """
 
 GLOBAL_CSS = """
-/* Ocultar toolbar (Share, estrella, GitHub) y decoraciones */
 [data-testid="stToolbar"]    { visibility: hidden; }
 [data-testid="stDecoration"] { display: none; }
 #MainMenu                    { visibility: hidden; }
 footer                       { visibility: hidden; }
 
-/* Ocultar header pero mantener el botón de colapsar sidebar */
-header[data-testid="stHeader"] { background: none; }
-header[data-testid="stHeader"] > * { visibility: hidden; }
-[data-testid="stSidebarCollapseButton"] { visibility: visible !important; }
-[data-testid="collapsedControl"]        { visibility: visible !important; }
+/* NO ocultar header — causa problemas con el botón sidebar en Cloud */
 
-/* Eliminar padding superior vacío */
 [data-testid="stAppViewContainer"] > .main > .block-container {
     padding-top: 1.5rem;
     padding-bottom: 2rem;
     max-width: 100%;
 }
 
-/* Títulos */
 h1, h2, h3 { color: #1a1f2e; }
 
-/* Cards home */
 .reporte-card {
     border-radius: 12px;
     padding: 20px 16px;
