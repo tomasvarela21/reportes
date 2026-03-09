@@ -2,33 +2,15 @@
 staging_service.py
 ==================
 Servicio de staging y carga del Libro Diario para ReporteApp v2.
-
-Responsabilidades:
-  1. Detectar si el período ya existe en libro_diario
-  2. Registrar el intento de carga en input_staging
-  3. Ejecutar la carga (INSERT masivo con COPY)
-  4. En caso de reemplazo: DELETE del período existente + INSERT nuevo
-  5. Disparar el recálculo del libro_mayor desde el período afectado
-
-Flujo:
-    staging = StagingService(conn)
-
-    # Verificar si el período existe
-    info = staging.verificar_periodo(empresa, anio, mes)
-    if info.existe:
-        # Mostrar popup de confirmación en UI con info.resumen
-        ...
-
-    # Ejecutar carga (nueva o reemplazo)
-    resultado = staging.ejecutar_carga(df, empresa, anio, mes, archivo_nombre, reemplazar=True/False)
 """
 
 import io
 import logging
 import os
+import time
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Optional
+from typing import Optional, List
 
 import pandas as pd
 import psycopg2
@@ -48,7 +30,6 @@ log = logging.getLogger(__name__)
 
 @dataclass
 class PeriodoInfo:
-    """Información sobre un período existente en libro_diario."""
     existe: bool
     empresa: str
     periodo_anio: int
@@ -62,14 +43,15 @@ class PeriodoInfo:
 
 @dataclass
 class CargaResult:
-    """Resultado de una operación de carga."""
     ok: bool
-    accion: str = ""           # 'carga_nueva' | 'reemplazo'
+    accion: str = ""           # 'carga_nueva' | 'reemplazo' | 'mixto'
     registros_cargados: int = 0
     registros_mayor: int = 0
     errores: list = field(default_factory=list)
     staging_id: Optional[int] = None
     duracion_ms: int = 0
+    periodos_cargados: list = field(default_factory=list)   # [(anio, mes, n_registros)]
+    periodos_reemplazados: list = field(default_factory=list)
 
 
 class StagingService:
@@ -79,54 +61,104 @@ class StagingService:
         self.conn = conn or psycopg2.connect(DATABASE_URL)
 
     # =========================================================================
-    # Verificación de período existente
+    # Verificación de período existente (un solo mes)
     # =========================================================================
 
     def verificar_periodo(self, empresa: str, anio: int, mes: int) -> PeriodoInfo:
-        """
-        Verifica si ya existe un período cargado en libro_diario.
-        Devuelve PeriodoInfo con el resumen del período existente para mostrar en UI.
-        """
         cur = self.conn.cursor()
         try:
             cur.execute("""
                 SELECT
-                    COUNT(*)                    AS total_registros,
-                    COALESCE(SUM(debe), 0)      AS total_debe,
-                    COALESCE(SUM(haber), 0)     AS total_haber,
-                    MIN(cargado_en)             AS fecha_carga,
-                    MIN(archivo_origen)         AS archivo_origen
+                    COUNT(*),
+                    COALESCE(SUM(debe), 0),
+                    COALESCE(SUM(haber), 0),
+                    MIN(cargado_en),
+                    MIN(archivo_origen)
                 FROM libro_diario
-                WHERE empresa = %s
-                  AND periodo_anio = %s
-                  AND periodo_mes = %s
+                WHERE empresa = %s AND periodo_anio = %s AND periodo_mes = %s
             """, (empresa, anio, mes))
             row = cur.fetchone()
-
             if row and row[0] > 0:
                 return PeriodoInfo(
-                    existe=True,
-                    empresa=empresa,
-                    periodo_anio=anio,
-                    periodo_mes=mes,
-                    total_registros=row[0],
-                    total_debe=float(row[1]),
-                    total_haber=float(row[2]),
-                    fecha_carga=row[3],
+                    existe=True, empresa=empresa,
+                    periodo_anio=anio, periodo_mes=mes,
+                    total_registros=row[0], total_debe=float(row[1]),
+                    total_haber=float(row[2]), fecha_carga=row[3],
                     archivo_origen=row[4],
                 )
-            else:
-                return PeriodoInfo(
-                    existe=False,
-                    empresa=empresa,
-                    periodo_anio=anio,
-                    periodo_mes=mes,
-                )
+            return PeriodoInfo(existe=False, empresa=empresa, periodo_anio=anio, periodo_mes=mes)
         finally:
             cur.close()
 
     # =========================================================================
-    # Carga principal
+    # Verificación de múltiples períodos de un DataFrame
+    # =========================================================================
+
+    def verificar_periodos_df(self, df: pd.DataFrame, empresa: str) -> List[PeriodoInfo]:
+        """
+        Dado un DataFrame con múltiples períodos, devuelve PeriodoInfo para cada uno.
+        Los períodos se devuelven ordenados cronológicamente.
+        """
+        periodos = sorted(
+            df[['periodo_anio', 'periodo_mes']].drop_duplicates().values.tolist()
+        )
+        return [self.verificar_periodo(empresa, anio, mes) for anio, mes in periodos]
+
+    # =========================================================================
+    # Carga de UN solo período (uso interno)
+    # =========================================================================
+
+    def _cargar_periodo(self, cur, df_mes: pd.DataFrame, empresa: str,
+                        anio: int, mes: int, archivo_nombre: str,
+                        reemplazar: bool) -> tuple:
+        """
+        Carga un período específico. Devuelve (staging_id, registros_cargados, accion).
+        """
+        info = self.verificar_periodo(empresa, anio, mes)
+
+        if info.existe and not reemplazar:
+            raise ValueError(
+                f"El período {anio}/{mes:02d} ya existe y no se indicó reemplazar."
+            )
+
+        accion = 'reemplazo' if info.existe else 'carga_nueva'
+
+        # Registrar en staging
+        cur.execute("""
+            INSERT INTO input_staging
+                (empresa, periodo_anio, periodo_mes, archivo_nombre,
+                 estado, total_registros, total_debe, total_haber, periodo_existia)
+            VALUES (%s, %s, %s, %s, 'pendiente', %s, %s, %s, %s)
+            RETURNING id
+        """, (
+            empresa, anio, mes, archivo_nombre,
+            len(df_mes),
+            float(df_mes['debe'].sum()),
+            float(df_mes['haber'].sum()),
+            info.existe,
+        ))
+        staging_id = cur.fetchone()[0]
+
+        # Eliminar si es reemplazo
+        if info.existe:
+            cur.execute("""
+                DELETE FROM libro_diario
+                WHERE empresa = %s AND periodo_anio = %s AND periodo_mes = %s
+            """, (empresa, anio, mes))
+
+        # Insertar
+        registros = self._bulk_insert(cur, df_mes, archivo_nombre)
+
+        # Actualizar staging
+        cur.execute("""
+            UPDATE input_staging SET estado = 'procesado', procesado_en = NOW()
+            WHERE id = %s
+        """, (staging_id,))
+
+        return staging_id, registros, accion
+
+    # =========================================================================
+    # Carga principal — soporta uno o múltiples períodos
     # =========================================================================
 
     def ejecutar_carga(
@@ -138,119 +170,118 @@ class StagingService:
         archivo_nombre: str,
         reemplazar: bool = False,
     ) -> CargaResult:
-        """
-        Ejecuta la carga del DataFrame en libro_diario y recalcula el mayor.
+        """Carga de un único período (compatibilidad hacia atrás)."""
+        df_mes = df[
+            (df['periodo_anio'] == periodo_anio) &
+            (df['periodo_mes'] == periodo_mes)
+        ].copy()
+        return self.ejecutar_carga_multiperiodo(
+            df=df_mes,
+            empresa=empresa,
+            archivo_nombre=archivo_nombre,
+            periodos_reemplazar={(periodo_anio, periodo_mes): reemplazar},
+        )
 
-        Args:
-            df:             DataFrame limpio y validado del FileParser
-            empresa:        código de empresa
-            periodo_anio:   año del período
-            periodo_mes:    mes del período
-            archivo_nombre: nombre del archivo original (para auditoría)
-            reemplazar:     True = eliminar período existente y recargar
-                            False = carga nueva (falla si el período ya existe)
-
-        Returns:
-            CargaResult con el resultado de la operación
+    def ejecutar_carga_multiperiodo(
+        self,
+        df: pd.DataFrame,
+        empresa: str,
+        archivo_nombre: str,
+        periodos_reemplazar: dict,  # {(anio, mes): bool} — True = reemplazar
+    ) -> CargaResult:
         """
-        import time
+        Carga múltiples períodos de un DataFrame.
+
+        periodos_reemplazar: dict donde la clave es (anio, mes) y el valor
+        indica si se debe reemplazar ese período si ya existe.
+
+        El recálculo del mayor se hace UNA sola vez desde el período más viejo,
+        para que el saldo_acumulado se arrastre correctamente mes a mes.
+        """
         inicio = time.time()
         resultado = CargaResult(ok=False)
         cur = self.conn.cursor()
 
         try:
-            # 1. Verificar si el período existe
-            info = self.verificar_periodo(empresa, periodo_anio, periodo_mes)
+            # Períodos ordenados cronológicamente
+            periodos = sorted(periodos_reemplazar.keys())
 
-            if info.existe and not reemplazar:
-                resultado.errores.append(
-                    f"El período {periodo_anio}/{periodo_mes:02d} de {empresa} ya existe "
-                    f"({info.total_registros} registros). "
-                    f"Confirmá el reemplazo para continuar."
+            total_cargados = 0
+            periodos_cargados = []
+            periodos_reemplazados = []
+
+            for anio, mes in periodos:
+                reemplazar = periodos_reemplazar[(anio, mes)]
+                df_mes = df[
+                    (df['periodo_anio'] == anio) &
+                    (df['periodo_mes'] == mes)
+                ].copy()
+
+                if df_mes.empty:
+                    log.warning(f"DataFrame vacío para {anio}/{mes:02d}, saltando.")
+                    continue
+
+                staging_id, registros, accion = self._cargar_periodo(
+                    cur, df_mes, empresa, anio, mes, archivo_nombre, reemplazar
                 )
-                return resultado
 
-            accion = 'reemplazo' if info.existe else 'carga_nueva'
-            resultado.accion = accion
+                total_cargados += registros
+                periodos_cargados.append((anio, mes, registros))
+                if accion == 'reemplazo':
+                    periodos_reemplazados.append((anio, mes))
 
-            # 2. Registrar en input_staging
-            cur.execute("""
-                INSERT INTO input_staging
-                    (empresa, periodo_anio, periodo_mes, archivo_nombre,
-                     estado, total_registros, total_debe, total_haber, periodo_existia)
-                VALUES (%s, %s, %s, %s, 'pendiente', %s, %s, %s, %s)
-                RETURNING id
-            """, (
-                empresa, periodo_anio, periodo_mes, archivo_nombre,
-                len(df),
-                float(df['debe'].sum()),
-                float(df['haber'].sum()),
-                info.existe,
-            ))
-            staging_id = cur.fetchone()[0]
-            resultado.staging_id = staging_id
-            log.info(f"Staging registrado — id={staging_id} — acción={accion}")
+                log.info(f"  ✅ {anio}/{mes:02d} — {registros} registros ({accion})")
 
-            # 3. Si es reemplazo, eliminar período existente
-            if info.existe:
-                cur.execute("""
-                    DELETE FROM libro_diario
-                    WHERE empresa = %s
-                      AND periodo_anio = %s
-                      AND periodo_mes = %s
-                """, (empresa, periodo_anio, periodo_mes))
-                log.info(f"Período eliminado: {empresa} {periodo_anio}/{periodo_mes:02d} "
-                         f"({info.total_registros} registros)")
+            resultado.registros_cargados = total_cargados
+            resultado.periodos_cargados  = periodos_cargados
+            resultado.periodos_reemplazados = periodos_reemplazados
 
-            # 4. Cargar nuevo período con COPY (bulk insert)
-            registros_cargados = self._bulk_insert(cur, df, archivo_nombre)
-            resultado.registros_cargados = registros_cargados
+            # Determinar acción global
+            n_reemplazos = len(periodos_reemplazados)
+            if n_reemplazos == 0:
+                resultado.accion = 'carga_nueva'
+            elif n_reemplazos == len(periodos_cargados):
+                resultado.accion = 'reemplazo'
+            else:
+                resultado.accion = 'mixto'
 
-            # 5. Actualizar staging a 'procesado'
-            cur.execute("""
-                UPDATE input_staging
-                SET estado = 'procesado', procesado_en = NOW()
-                WHERE id = %s
-            """, (staging_id,))
-
-            # 6. Commit antes de recalcular mayor
+            # Commit de todos los inserts
             self.conn.commit()
-            log.info(f"✅ Carga completada — {registros_cargados} registros")
+            log.info(f"✅ Todos los períodos cargados — {total_cargados} registros")
 
-            # 7. Recalcular libro_mayor desde este período en adelante
-            motivo = 'reemplazo_periodo' if accion == 'reemplazo' else 'carga_nueva'
+            # Recálculo del mayor UNA sola vez desde el período más viejo
+            # Así el saldo_acumulado se arrastra correctamente mes a mes
+            anio_desde, mes_desde = periodos[0]
+            motivo = f"carga_multiperiodo_{len(periodos)}_meses"
+
             calc = MayorCalculator(self.conn)
             registros_mayor = calc.recalcular(
                 empresa=empresa,
-                desde_anio=periodo_anio,
-                desde_mes=periodo_mes,
-                motivo=motivo
+                desde_anio=anio_desde,
+                desde_mes=mes_desde,
+                motivo=motivo,
             )
             resultado.registros_mayor = registros_mayor
 
             resultado.duracion_ms = int((time.time() - inicio) * 1000)
             resultado.ok = True
-            log.info(f"✅ Proceso completo — mayor: {registros_mayor} registros — "
-                     f"{resultado.duracion_ms}ms")
+            log.info(f"✅ Mayor recalculado desde {anio_desde}/{mes_desde:02d} "
+                     f"— {registros_mayor} registros — {resultado.duracion_ms}ms")
 
         except Exception as e:
             self.conn.rollback()
             resultado.errores.append(f"Error en la carga: {str(e)}")
-            log.error(f"❌ Error en carga: {e}")
+            log.error(f"❌ Error: {e}")
 
-            # Actualizar staging a 'rechazado'
+            # Marcar staging como rechazado si aplica
             try:
                 cur2 = self.conn.cursor()
                 if resultado.staging_id:
                     cur2.execute("""
-                        UPDATE input_staging
-                        SET estado = 'rechazado',
+                        UPDATE input_staging SET estado = 'rechazado',
                             errores_json = %s::jsonb
                         WHERE id = %s
-                    """, (
-                        f'{{"error": "{str(e)}"}}',
-                        resultado.staging_id
-                    ))
+                    """, (f'{{"error": "{str(e)}"}}', resultado.staging_id))
                     self.conn.commit()
                 cur2.close()
             except Exception:
@@ -262,17 +293,11 @@ class StagingService:
         return resultado
 
     # =========================================================================
-    # Bulk insert con COPY
+    # Bulk insert
     # =========================================================================
 
     def _bulk_insert(self, cur, df: pd.DataFrame, archivo_nombre: str) -> int:
-        """
-        Carga masiva usando execute_values para máxima performance.
-        Agrega archivo_origen y cargado_en a cada fila.
-        """
         ahora = datetime.now()
-
-        # Preparar registros
         registros = []
         for _, row in df.iterrows():
             registros.append((
@@ -305,7 +330,6 @@ class StagingService:
             registros,
             page_size=1000
         )
-
         return len(registros)
 
     def close(self):
