@@ -29,12 +29,44 @@ apply_styles(extra_css="""
 .periodo-badge{display:inline-block;background:#f0fdf4;border:1px solid #bbf7d0;
     border-radius:6px;padding:3px 10px;color:#15803d;font-size:.8rem;font-weight:600;margin:2px}
 .periodo-badge.existe{background:#fff7ed;border-color:#fed7aa;color:#c2410c}
+.cuenta-nueva-form{background:#f0fdf4;border:1px solid #bbf7d0;border-radius:10px;
+    padding:16px;margin:8px 0}
 """)
 render_sidebar()
 
 EMPRESAS = ["BATIA","GUARE","NORFORK","TORRES","WERCOLICH"]
 MESES = {1:"Enero",2:"Febrero",3:"Marzo",4:"Abril",5:"Mayo",6:"Junio",
          7:"Julio",8:"Agosto",9:"Septiembre",10:"Octubre",11:"Noviembre",12:"Diciembre"}
+
+# Rubros y tipos del plan de cuentas
+RUBROS_TIPOS = [
+    ("Disponibilidades",                "Activo",     1),
+    ("Inversiones",                     "Activo",     2),
+    ("Créditos por Ventas",             "Activo",     3),
+    ("Créditos Impositivos",            "Activo",     4),
+    ("Otros Créditos",                  "Activo",     5),
+    ("Bienes de Cambio",                "Activo",     6),
+    ("Bienes de Uso",                   "Activo",     7),
+    ("Deudas Comerciales",              "Pasivo",     8),
+    ("Deudas Sociales",                 "Pasivo",     9),
+    ("Deudas Fiscales",                 "Pasivo",    10),
+    ("Deudas Financieras",              "Pasivo",    11),
+    ("Otras Deudas",                    "Pasivo",    12),
+    ("Patrimonio Neto",                 "Patrimonio",13),
+    ("Resultado - Ingresos",            "Resultado", 14),
+    ("Resultado - Ingresos Obra",       "Resultado", 15),
+    ("Resultado - Ingresos Inmobiliaria","Resultado",16),
+    ("Resultado - Otros Ingresos",      "Resultado", 17),
+    ("Resultado - Gto Obra",            "Resultado", 18),
+    ("Resultado - Gto Inmob",           "Resultado", 19),
+    ("Resultado - Administ",            "Resultado", 20),
+    ("Resultado - Comerciales",         "Resultado", 21),
+    ("Resultado - Financiero",          "Resultado", 22),
+]
+RUBROS      = [r[0] for r in RUBROS_TIPOS]
+RUBRO_TIPO  = {r[0]: r[1] for r in RUBROS_TIPOS}
+RUBRO_ORDEN = {r[0]: r[2] for r in RUBROS_TIPOS}
+MONEDAS     = {1: "Pesos ARS", 2: "Dólares USD", 3: "Euros EUR"}
 
 def step_bar(paso_actual):
     pasos = ["1 · Archivo","2 · Preview","3 · Validación","4 · Confirmar","5 · Resultado"]
@@ -57,11 +89,45 @@ def nombre_periodo(anio, mes):
 
 def reset_estado():
     for key in ['paso','parse_result','val_result','val_resumen','periodos_info',
-                'empresa_sel','archivo_nombre','periodos_reemplazar','empresa_detectada']:
+                'empresa_sel','archivo_nombre','periodos_reemplazar','empresa_detectada',
+                'cuentas_agregadas']:
         st.session_state.pop(key, None)
+
+def agregar_cuenta_db(conn, codigo, nombre, rubro, tipo, es_resultado, moneda, orden_rubro) -> tuple:
+    """Inserta una cuenta nueva en dim_cuenta. Retorna (ok, mensaje)."""
+    try:
+        cur = conn.cursor()
+        # Verificar que no exista
+        cur.execute("SELECT id FROM dim_cuenta WHERE codigo = %s", (codigo,))
+        if cur.fetchone():
+            cur.close()
+            return False, f"La cuenta {codigo} ya existe en el plan de cuentas."
+        cur.execute("""
+            INSERT INTO dim_cuenta (codigo, nombre, rubro, tipo, es_resultado, moneda, orden_rubro, activa)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, true)
+        """, (codigo, nombre, rubro, tipo, es_resultado, moneda, orden_rubro))
+        conn.commit()
+        cur.close()
+        return True, f"Cuenta {codigo} — {nombre} agregada correctamente."
+    except Exception as e:
+        conn.rollback()
+        return False, f"Error al agregar cuenta: {e}"
+
+def revalidar(df, df_raw, empresa, periodos):
+    """Re-ejecuta la validación y actualiza session_state."""
+    conn = get_conn()
+    if conn is None:
+        return
+    validator  = Validator(conn)
+    val_result = validator.validar(df, df_raw, empresa, periodos[0][0], periodos[0][1])
+    resumen    = validator.resumen_texto(val_result)
+    st.session_state.val_result  = val_result
+    st.session_state.val_resumen = resumen
 
 if 'paso' not in st.session_state:
     st.session_state.paso = 1
+if 'cuentas_agregadas' not in st.session_state:
+    st.session_state.cuentas_agregadas = []
 
 st.title("📤 Carga de Libro Diario")
 st.caption("Subí el CSV mensual o multi-período, validalo y confirmá la carga.")
@@ -75,8 +141,7 @@ if st.session_state.paso == 1:
     st.subheader("Paso 1 · Seleccioná la empresa y el archivo")
 
     archivo = st.file_uploader("Archivo CSV del Libro Diario", type=["csv"],
-                                help="Separador punto y coma (;), encoding latin-1/cp1252. "
-                                     "Puede contener uno o varios meses.")
+                                help="Separador punto y coma (;), encoding latin-1/cp1252.")
 
     empresa_sugerida = None
     if archivo is not None:
@@ -87,8 +152,7 @@ if st.session_state.paso == 1:
                 f'<strong>{empresa_sugerida}</strong></div>', unsafe_allow_html=True)
 
     idx_empresa = EMPRESAS.index(empresa_sugerida) if empresa_sugerida in EMPRESAS else 0
-    empresa = st.selectbox("Empresa", EMPRESAS, index=idx_empresa,
-                           help="Podés cambiar si la detección no fue correcta")
+    empresa = st.selectbox("Empresa", EMPRESAS, index=idx_empresa)
 
     if archivo:
         st.success(f"Archivo cargado: **{archivo.name}** ({archivo.size/1024:.1f} KB)")
@@ -111,42 +175,34 @@ elif st.session_state.paso == 2:
     result  = st.session_state.parse_result
     empresa = st.session_state.empresa_sel
     df      = result.dataframe
-
-    # Períodos detectados
     periodos = sorted(df[['periodo_anio','periodo_mes']].drop_duplicates().values.tolist())
-    es_multiperiodo = len(periodos) > 1
 
     st.subheader("Paso 2 · Preview del archivo")
-
-    # Métricas generales
     col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Empresa",        empresa)
-    col2.metric("Períodos",       len(periodos))
-    col3.metric("Filas válidas",  f"{result.total_filas_validas:,}")
-    col4.metric("Filas raw",      f"{result.total_filas_raw:,}")
+    col1.metric("Empresa",       empresa)
+    col2.metric("Períodos",      len(periodos))
+    col3.metric("Filas válidas", f"{result.total_filas_validas:,}")
+    col4.metric("Filas raw",     f"{result.total_filas_raw:,}")
 
-    # Badges de períodos detectados
     badges_html = "**Períodos detectados:** "
     for anio, mes in periodos:
         n = len(df[(df['periodo_anio']==anio) & (df['periodo_mes']==mes)])
         badges_html += f'<span class="periodo-badge">{nombre_periodo(anio, mes)} ({n:,} filas)</span> '
     st.markdown(badges_html, unsafe_allow_html=True)
-
     st.divider()
 
-    # Resumen por período si hay más de uno
-    if es_multiperiodo:
+    if len(periodos) > 1:
         st.markdown("**Resumen por período:**")
-        resumen_rows = []
+        rows = []
         for anio, mes in periodos:
             df_mes = df[(df['periodo_anio']==anio) & (df['periodo_mes']==mes)]
-            resumen_rows.append({
-                "Período":   nombre_periodo(anio, mes),
-                "Filas":     len(df_mes),
+            rows.append({
+                "Período":     nombre_periodo(anio, mes),
+                "Filas":       len(df_mes),
                 "Total Debe":  f"{df_mes['debe'].sum():,.2f}",
                 "Total Haber": f"{df_mes['haber'].sum():,.2f}",
             })
-        st.dataframe(pd.DataFrame(resumen_rows), use_container_width=True, hide_index=True)
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
         st.divider()
 
     st.markdown("**Primeras 50 filas:**")
@@ -167,12 +223,8 @@ elif st.session_state.paso == 2:
                 if conn is None: st.stop()
                 validator  = Validator(conn)
                 df_raw     = getattr(result, 'dataframe_raw', pd.DataFrame())
-                # Validar sobre el DataFrame completo (todos los períodos juntos)
-                val_result = validator.validar(
-                    df, df_raw, empresa,
-                    periodos[0][0], periodos[0][1]   # anio/mes del primero (solo para log)
-                )
-                resumen = validator.resumen_texto(val_result)
+                val_result = validator.validar(df, df_raw, empresa, periodos[0][0], periodos[0][1])
+                resumen    = validator.resumen_texto(val_result)
             st.session_state.val_result  = val_result
             st.session_state.val_resumen = resumen
             st.session_state.paso = 3; st.rerun()
@@ -186,6 +238,7 @@ elif st.session_state.paso == 3:
     resumen = st.session_state.val_resumen
     empresa = st.session_state.empresa_sel
     df      = result.dataframe
+    df_raw  = getattr(result, 'dataframe_raw', pd.DataFrame())
     periodos = sorted(df[['periodo_anio','periodo_mes']].drop_duplicates().values.tolist())
 
     st.subheader("Paso 3 · Resultado de validación")
@@ -195,16 +248,137 @@ elif st.session_state.paso == 3:
     col3.metric("Total Haber", f"{resumen['total_haber']:,.2f}")
     st.divider()
 
+    # Mostrar cuentas agregadas en esta sesión
+    if st.session_state.cuentas_agregadas:
+        st.success(
+            f"✅ Cuentas agregadas al plan en esta sesión: "
+            f"{', '.join(str(c) for c in st.session_state.cuentas_agregadas)}"
+        )
+
     st.markdown("**Resultado por validación:**")
     for check in resumen['checks']:
         st.markdown(badge_check(check), unsafe_allow_html=True)
 
-    if not val.tipos_ok and val.tipos_problemas:
-        with st.expander(f"📋 Ver valores no numéricos ({len(val.tipos_problemas)} filas)"):
-            st.dataframe(pd.DataFrame(val.tipos_problemas), use_container_width=True, hide_index=True)
-    if not val.balance_ok and val.asientos_desbalanceados:
-        with st.expander(f"📋 Ver asientos desbalanceados ({len(val.asientos_desbalanceados)})"):
-            st.dataframe(pd.DataFrame(val.asientos_desbalanceados), use_container_width=True, hide_index=True)
+        # Expander especial para cuentas inexistentes con formulario de alta
+        if check['nombre'] == 'Plan de cuentas' and not check['ok'] and val.cuentas_inexistentes:
+            with st.expander(
+                f"📋 Ver cuentas inexistentes ({len(val.cuentas_inexistentes)}) "
+                f"— podés agregarlas al plan aquí"
+            ):
+                for cod in val.cuentas_inexistentes:
+                    st.markdown(f"**Cuenta {cod}**")
+                    form_key = f"form_cuenta_{cod}"
+
+                    # Detectar filas del archivo que usan esta cuenta (para contexto)
+                    filas_cuenta = df[df['cuenta_codigo'] == cod]
+                    desc_ejemplo = None
+                    if not filas_cuenta.empty:
+                        # Tomar la descripción más frecuente como sugerencia de nombre
+                        desc_ejemplo = (
+                            filas_cuenta['descripcion'].dropna()
+                            .value_counts().index[0]
+                            if filas_cuenta['descripcion'].notna().any() else None
+                        )
+                        tiene_subcta = filas_cuenta['nro_subcuenta'].notna().any()
+                        tiene_tipo   = filas_cuenta['tipo_subcuenta'].notna().any()
+                        n_filas      = len(filas_cuenta)
+                        st.caption(
+                            f"Usada en {n_filas} fila(s) del archivo"
+                            + (f" · con subcuenta" if tiene_subcta else "")
+                            + (f" · con tipo subcuenta" if tiene_tipo else "")
+                        )
+
+                    with st.form(key=form_key):
+                        st.markdown(f'<div class="cuenta-nueva-form">', unsafe_allow_html=True)
+
+                        col_a, col_b = st.columns([1, 3])
+                        with col_a:
+                            codigo_input = st.number_input(
+                                "Código *", value=int(cod), disabled=True,
+                                key=f"cod_{cod}"
+                            )
+                        with col_b:
+                            nombre_input = st.text_input(
+                                "Nombre *",
+                                value=desc_ejemplo[:60] if desc_ejemplo else "",
+                                key=f"nom_{cod}",
+                                placeholder="Nombre de la cuenta"
+                            )
+
+                        col_c, col_d = st.columns(2)
+                        with col_c:
+                            rubro_input = st.selectbox(
+                                "Rubro *", RUBROS, key=f"rub_{cod}"
+                            )
+                        with col_d:
+                            tipo_input = st.text_input(
+                                "Tipo", value=RUBRO_TIPO.get(rubro_input, ""),
+                                disabled=True, key=f"tip_{cod}"
+                            )
+
+                        col_e, col_f, col_g = st.columns(3)
+                        with col_e:
+                            es_resultado_input = st.checkbox(
+                                "¿Es cuenta de resultado?",
+                                value=RUBRO_TIPO.get(rubro_input, "") == "Resultado",
+                                key=f"res_{cod}"
+                            )
+                        with col_f:
+                            moneda_input = st.selectbox(
+                                "Moneda",
+                                options=list(MONEDAS.keys()),
+                                format_func=lambda x: MONEDAS[x],
+                                key=f"mon_{cod}"
+                            )
+                        with col_g:
+                            tipo_subcta_input = st.number_input(
+                                "Tipo subcuenta", value=0, min_value=0,
+                                help="0 = sin subcuenta",
+                                key=f"tsc_{cod}"
+                            )
+
+                        st.markdown('</div>', unsafe_allow_html=True)
+
+                        submitted = st.form_submit_button(
+                            f"➕ Agregar cuenta {cod} al plan de cuentas",
+                            type="primary"
+                        )
+
+                        if submitted:
+                            if not nombre_input.strip():
+                                st.error("El nombre es obligatorio.")
+                            else:
+                                conn = get_conn()
+                                if conn is None: st.stop()
+                                ok, msg = agregar_cuenta_db(
+                                    conn=conn,
+                                    codigo=int(cod),
+                                    nombre=nombre_input.strip(),
+                                    rubro=rubro_input,
+                                    tipo=RUBRO_TIPO[rubro_input],
+                                    es_resultado=es_resultado_input,
+                                    moneda=moneda_input,
+                                    orden_rubro=RUBRO_ORDEN[rubro_input],
+                                )
+                                if ok:
+                                    st.session_state.cuentas_agregadas.append(cod)
+                                    # Re-validar para actualizar el check de plan de cuentas
+                                    revalidar(df, df_raw, empresa, periodos)
+                                    st.success(msg)
+                                    st.rerun()
+                                else:
+                                    st.error(msg)
+
+                    st.divider()
+
+        # Otros expanders existentes
+        elif check['nombre'] == 'Tipos de montos' and not check['ok'] and val.tipos_problemas:
+            with st.expander(f"📋 Ver valores no numéricos ({len(val.tipos_problemas)} filas)"):
+                st.dataframe(pd.DataFrame(val.tipos_problemas), use_container_width=True, hide_index=True)
+
+        elif check['nombre'] == 'Balance por asiento' and not check['ok'] and val.asientos_desbalanceados:
+            with st.expander(f"📋 Ver asientos desbalanceados ({len(val.asientos_desbalanceados)})"):
+                st.dataframe(pd.DataFrame(val.asientos_desbalanceados), use_container_width=True, hide_index=True)
 
     st.divider()
     if resumen['advertencias']:
@@ -217,7 +391,7 @@ elif st.session_state.paso == 3:
     with col_next:
         hay_errores = any(not c["ok"] and c.get("bloquea", True) for c in resumen['checks'])
         if hay_errores:
-            st.error("Hay errores bloqueantes. Corregí el archivo y volvé a cargar.")
+            st.error("Hay errores bloqueantes. Corregí el archivo o agregá las cuentas faltantes.")
         else:
             if st.button("Continuar →", type="primary"):
                 conn = get_conn()
@@ -233,7 +407,7 @@ elif st.session_state.paso == 3:
 elif st.session_state.paso == 4:
     result         = st.session_state.parse_result
     empresa        = st.session_state.empresa_sel
-    periodos_info  = st.session_state.periodos_info   # List[PeriodoInfo]
+    periodos_info  = st.session_state.periodos_info
     archivo_nombre = st.session_state.archivo_nombre
     df             = result.dataframe
 
@@ -241,7 +415,6 @@ elif st.session_state.paso == 4:
     periodos_nuevos     = [p for p in periodos_info if not p.existe]
 
     st.subheader("Paso 4 · Confirmación")
-
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("Empresa",    empresa)
     col2.metric("Períodos",   len(periodos_info))
@@ -249,44 +422,38 @@ elif st.session_state.paso == 4:
     col4.metric("Ya existen", len(periodos_existentes))
     st.divider()
 
-    # Períodos nuevos — sin warning
     if periodos_nuevos:
         st.markdown("**✅ Períodos nuevos (se cargarán sin reemplazar nada):**")
         for p in periodos_nuevos:
             n_filas = len(df[(df['periodo_anio']==p.periodo_anio) & (df['periodo_mes']==p.periodo_mes)])
             st.markdown(
                 f'<span class="periodo-badge">{nombre_periodo(p.periodo_anio, p.periodo_mes)} '
-                f'— {n_filas:,} filas</span>', unsafe_allow_html=True
-            )
+                f'— {n_filas:,} filas</span>', unsafe_allow_html=True)
         st.write("")
 
-    # Períodos existentes — warning individual con checkbox
     confirmaciones = {}
     if periodos_existentes:
         st.markdown("**⚠️ Períodos que ya tienen datos — confirmá reemplazo individual:**")
         for p in periodos_existentes:
             n_filas = len(df[(df['periodo_anio']==p.periodo_anio) & (df['periodo_mes']==p.periodo_mes)])
-            with st.container():
-                st.markdown(f"""<div class="modal-warning">
-                    <div style="font-size:1rem;font-weight:700;color:#c2410c">
-                        ⚠️ {nombre_periodo(p.periodo_anio, p.periodo_mes)} ya tiene datos cargados
-                    </div>
-                    <div style="margin-top:8px;color:#374151;line-height:1.8;font-size:.85rem">
-                        <b>Registros existentes:</b> {p.total_registros:,} &nbsp;|&nbsp;
-                        <b>Cargado el:</b> {p.fecha_carga.strftime('%d/%m/%Y %H:%M') if p.fecha_carga else '—'}<br>
-                        <b>Archivo original:</b> {p.archivo_origen or '—'}<br>
-                        <b>Filas nuevas a cargar:</b> {n_filas:,}
-                    </div>
-                </div>""", unsafe_allow_html=True)
-                confirmaciones[(p.periodo_anio, p.periodo_mes)] = st.checkbox(
-                    f"Entiendo que los datos de {nombre_periodo(p.periodo_anio, p.periodo_mes)} "
-                    f"serán eliminados y reemplazados.",
-                    key=f"confirm_{p.periodo_anio}_{p.periodo_mes}"
-                )
+            st.markdown(f"""<div class="modal-warning">
+                <div style="font-size:1rem;font-weight:700;color:#c2410c">
+                    ⚠️ {nombre_periodo(p.periodo_anio, p.periodo_mes)} ya tiene datos cargados
+                </div>
+                <div style="margin-top:8px;color:#374151;line-height:1.8;font-size:.85rem">
+                    <b>Registros existentes:</b> {p.total_registros:,} &nbsp;|&nbsp;
+                    <b>Cargado el:</b> {p.fecha_carga.strftime('%d/%m/%Y %H:%M') if p.fecha_carga else '—'}<br>
+                    <b>Archivo original:</b> {p.archivo_origen or '—'}<br>
+                    <b>Filas nuevas a cargar:</b> {n_filas:,}
+                </div>
+            </div>""", unsafe_allow_html=True)
+            confirmaciones[(p.periodo_anio, p.periodo_mes)] = st.checkbox(
+                f"Entiendo que los datos de {nombre_periodo(p.periodo_anio, p.periodo_mes)} "
+                f"serán eliminados y reemplazados.",
+                key=f"confirm_{p.periodo_anio}_{p.periodo_mes}"
+            )
 
     st.divider()
-
-    # Info del recálculo
     anio_desde = periodos_info[0].periodo_anio
     mes_desde  = periodos_info[0].periodo_mes
     st.info(
@@ -294,22 +461,28 @@ elif st.session_state.paso == 4:
         f"en adelante, respetando el saldo acumulado mes a mes."
     )
 
+    # Mostrar cuentas agregadas en esta sesión si las hay
+    if st.session_state.cuentas_agregadas:
+        st.success(
+            f"✅ Se agregaron {len(st.session_state.cuentas_agregadas)} cuenta(s) nuevas al plan: "
+            f"{', '.join(str(c) for c in st.session_state.cuentas_agregadas)}"
+        )
+
     col_back, col_proc = st.columns([1,5])
     with col_back:
         if st.button("← Volver"): st.session_state.paso = 3; st.rerun()
     with col_proc:
-        # Botón habilitado solo si todos los períodos existentes fueron confirmados
-        todos_confirmados = all(confirmaciones.get((p.periodo_anio, p.periodo_mes), False)
-                                for p in periodos_existentes)
-        puede_continuar   = len(periodos_existentes) == 0 or todos_confirmados
-
+        todos_confirmados = all(
+            confirmaciones.get((p.periodo_anio, p.periodo_mes), False)
+            for p in periodos_existentes
+        )
+        puede_continuar = len(periodos_existentes) == 0 or todos_confirmados
         label_btn = "✅ Confirmar carga →" if not periodos_existentes else "🔄 Confirmar y reemplazar →"
         if st.button(label_btn, type="primary", disabled=not puede_continuar):
-            # Armar dict periodos_reemplazar
-            periodos_reemplazar = {}
-            for p in periodos_info:
-                key = (p.periodo_anio, p.periodo_mes)
-                periodos_reemplazar[key] = p.existe  # True si existe (confirmado), False si es nuevo
+            periodos_reemplazar = {
+                (p.periodo_anio, p.periodo_mes): p.existe
+                for p in periodos_info
+            }
             st.session_state.periodos_reemplazar = periodos_reemplazar
             st.session_state.paso = 5; st.rerun()
 
@@ -327,7 +500,6 @@ elif st.session_state.paso == 5:
     primer_periodo     = periodos_ordenados[0]
 
     st.subheader("Paso 5 · Procesando...")
-
     with st.spinner(
         f"Cargando {len(periodos_ordenados)} período(s) y recalculando Libro Mayor "
         f"desde {nombre_periodo(*primer_periodo)}..."
@@ -343,7 +515,6 @@ elif st.session_state.paso == 5:
         )
 
     st.divider()
-
     if carga.ok:
         accion_txt = {
             'carga_nueva': "Carga nueva",
@@ -352,23 +523,21 @@ elif st.session_state.paso == 5:
         }.get(carga.accion, carga.accion)
 
         st.success(f"✅ {accion_txt} completada exitosamente.")
-
         col1, col2, col3, col4 = st.columns(4)
         col1.metric("Registros cargados", f"{carga.registros_cargados:,}")
         col2.metric("Registros en Mayor", f"{carga.registros_mayor:,}")
         col3.metric("Períodos cargados",  len(carga.periodos_cargados))
         col4.metric("Tiempo",             f"{carga.duracion_ms/1000:.1f}s")
 
-        # Detalle por período
         if len(carga.periodos_cargados) > 1:
             st.markdown("**Detalle por período:**")
             rows = []
             for anio, mes, n in carga.periodos_cargados:
-                fue_reemplazo = (anio, mes) in [(a, m) for a, m in carga.periodos_reemplazados]
+                fue_reemplazo = (anio, mes) in carga.periodos_reemplazados
                 rows.append({
-                    "Período":  nombre_periodo(anio, mes),
+                    "Período":   nombre_periodo(anio, mes),
                     "Registros": n,
-                    "Acción":   "🔄 Reemplazo" if fue_reemplazo else "✅ Nuevo",
+                    "Acción":    "🔄 Reemplazo" if fue_reemplazo else "✅ Nuevo",
                 })
             st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
