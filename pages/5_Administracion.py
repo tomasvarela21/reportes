@@ -30,6 +30,22 @@ def get_centros(conn):
     df = pd.DataFrame(cur.fetchall(), columns=['Código','Descripción','Empresa','Activo'])
     cur.close(); return df
 
+def get_plan_cuentas(conn):
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT codigo, nombre, rubro, tipo, es_resultado, moneda, tipo_subcta, activa
+        FROM dim_cuenta
+        ORDER BY orden_rubro NULLS LAST, codigo
+    """)
+    rows = cur.fetchall()
+    cur.close()
+    df = pd.DataFrame(rows, columns=[
+        'Código','Nombre','Rubro','Tipo','Es Resultado','Moneda','Tipo Subcta','Activa'
+    ])
+    moneda_map = {1: 'ARS', 2: 'USD', 3: 'EUR'}
+    df['Moneda'] = df['Moneda'].map(moneda_map).fillna(df['Moneda'])
+    return df
+
 def get_log(conn):
     cur = conn.cursor()
     cur.execute("""
@@ -49,14 +65,78 @@ st.divider()
 conn = get_conn()
 if conn is None: st.stop()
 
-tab1, tab2, tab3 = st.tabs(["🏢 Empresas", "🏷️ Centros de Costo", "📋 Log de recálculos"])
+tab1, tab2, tab3, tab4 = st.tabs([
+    "🏢 Empresas",
+    "📒 Plan de Cuentas",
+    "🏷️ Centros de Costo",
+    "📋 Log de recálculos",
+])
 
+# ─────────────────────────────────────────────
+# TAB 1 — Empresas
+# ─────────────────────────────────────────────
 with tab1:
     df_emp = ejecutar_con_reconexion(get_empresas)
     if df_emp is None: st.stop()
     st.dataframe(df_emp, use_container_width=True, hide_index=True)
 
+# ─────────────────────────────────────────────
+# TAB 2 — Plan de Cuentas
+# ─────────────────────────────────────────────
 with tab2:
+    df_pc = ejecutar_con_reconexion(get_plan_cuentas)
+    if df_pc is None: st.stop()
+
+    # Métricas
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Total cuentas",    len(df_pc))
+    col2.metric("Activas",          int(df_pc['Activa'].sum()) if 'Activa' in df_pc else "—")
+    col3.metric("Cuentas resultado", int(df_pc['Es Resultado'].sum()) if 'Es Resultado' in df_pc else "—")
+    col4.metric("Rubros",           df_pc['Rubro'].nunique())
+    st.divider()
+
+    # Filtros
+    col_f1, col_f2, col_f3 = st.columns([1, 2, 2])
+    with col_f1:
+        filtro_codigo = st.text_input(
+            "🔍 Filtrar por código",
+            placeholder="ej: 1, 38, 176",
+            help="Ingresá un código exacto o parte de él"
+        )
+    with col_f2:
+        rubros_disponibles = ["Todos"] + sorted(df_pc['Rubro'].dropna().unique().tolist())
+        filtro_rubro = st.selectbox("Filtrar por rubro", rubros_disponibles)
+    with col_f3:
+        tipos_disponibles = ["Todos"] + sorted(df_pc['Tipo'].dropna().unique().tolist())
+        filtro_tipo = st.selectbox("Filtrar por tipo", tipos_disponibles)
+
+    # Aplicar filtros
+    df_filtrado = df_pc.copy()
+    if filtro_codigo.strip():
+        df_filtrado = df_filtrado[
+            df_filtrado['Código'].astype(str).str.startswith(filtro_codigo.strip())
+        ]
+    if filtro_rubro != "Todos":
+        df_filtrado = df_filtrado[df_filtrado['Rubro'] == filtro_rubro]
+    if filtro_tipo != "Todos":
+        df_filtrado = df_filtrado[df_filtrado['Tipo'] == filtro_tipo]
+
+    st.caption(f"Mostrando **{len(df_filtrado)}** de {len(df_pc)} cuentas")
+    st.dataframe(
+        df_filtrado,
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "Código":        st.column_config.NumberColumn("Código", format="%d"),
+            "Es Resultado":  st.column_config.CheckboxColumn("Es Resultado"),
+            "Activa":        st.column_config.CheckboxColumn("Activa"),
+        }
+    )
+
+# ─────────────────────────────────────────────
+# TAB 3 — Centros de Costo
+# ─────────────────────────────────────────────
+with tab3:
     st.markdown("**Cargar maestro de centros de costo (CSV):**")
     st.code("codigo;descripcion;empresa")
     st.caption("La columna 'empresa' puede estar vacía para centros compartidos.")
@@ -94,7 +174,10 @@ with tab2:
     else:
         st.info("No hay centros de costo cargados todavía.")
 
-with tab3:
+# ─────────────────────────────────────────────
+# TAB 4 — Log de recálculos
+# ─────────────────────────────────────────────
+with tab4:
     df_log = ejecutar_con_reconexion(get_log)
     if df_log is None: st.stop()
     if df_log.empty:
