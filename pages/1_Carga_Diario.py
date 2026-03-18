@@ -150,7 +150,54 @@ if result.advertencias:
 
 if not result.ok:
     for err in result.errores:
-        st.error(f"❌ {err}")
+        if isinstance(err, dict) and err.get('__tipo__') == 'descuadre':
+            # ── Resumen del error ──────────────────────────────────────────
+            st.error(f"❌ {err['resumen']}")
+
+            for asiento in err['asientos']:
+                with st.container(border=True):
+                    # Encabezado del asiento
+                    ca, cb, cc, cd = st.columns(4)
+                    ca.markdown(f"**Asiento**  \n{asiento['nro_asiento']}")
+                    cb.markdown(f"**Tipo**  \n{asiento['tipo']}")
+                    cc.markdown(f"**Fecha**  \n{asiento['fecha']}")
+                    cd.markdown(f"**Diferencia**  \n:red[{asiento['diff']:+,.2f}]")
+
+                    st.divider()
+
+                    # Tabla de renglones
+                    df_reng = pd.DataFrame(asiento['renglones'])
+                    total_debe  = df_reng['Debe'].sum()
+                    total_haber = df_reng['Haber'].sum()
+                    diff        = round(total_debe + total_haber, 2)
+
+                    # Fila de totales
+                    fila_total = pd.DataFrame([{
+                        'Renglón': 'TOTAL',
+                        'Cuenta':  '',
+                        'Debe':    total_debe,
+                        'Haber':   total_haber,
+                    }])
+                    df_display = pd.concat([df_reng, fila_total], ignore_index=True)
+
+                    # Formatear montos
+                    for col in ['Debe', 'Haber']:
+                        df_display[col] = df_display[col].apply(
+                            lambda x: f"{x:+,.2f}" if isinstance(x, (int, float)) else x
+                        )
+
+                    st.dataframe(df_display, use_container_width=True, hide_index=True)
+
+                    # Fila de diferencia destacada
+                    color = "red" if abs(diff) > 0.01 else "green"
+                    st.markdown(
+                        f":{color}[**Diferencia: {diff:+,.2f}**] — "
+                        f"Total Debe: `{total_debe:+,.2f}` | "
+                        f"Total Haber: `{total_haber:+,.2f}`"
+                    )
+        else:
+            st.error(f"❌ {err}")
+
     if st.button("🔄 Reintentar con otro archivo"):
         reset_estado(); st.rerun()
     st.stop()

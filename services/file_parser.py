@@ -26,7 +26,6 @@ import pandas as pd
 
 log = logging.getLogger(__name__)
 
-# Mapeo nombre → empresa_id
 EMPRESAS = {
     'BATIA':     1,
     'GUARE':     3,
@@ -57,7 +56,7 @@ class ParseResult:
     empresa_id: int = 0
     empresa_nombre: str = ""
     empresa_detectada: Optional[str] = None
-    formato: str = ""          # 'A' o 'B'
+    formato: str = ""
     periodo_anio: Optional[int] = None
     periodo_mes: Optional[int] = None
 
@@ -90,7 +89,6 @@ class FileParser:
         nombre_archivo = getattr(archivo, 'name', '') or ''
         resultado.empresa_detectada = self.detectar_empresa(nombre_archivo)
 
-        # Leer archivo
         try:
             if hasattr(archivo, 'read'):
                 contenido = archivo.read()
@@ -111,7 +109,6 @@ class FileParser:
         n_cols = len(df_input.columns)
         log.info(f"Archivo leído: {resultado.total_filas_raw} filas, {n_cols} columnas")
 
-        # Detectar formato
         cols_lower = [c.lower().strip() for c in df_input.columns]
         es_formato_b = 'id_empresa' in cols_lower and n_cols == COLS_FORMATO_B
 
@@ -134,7 +131,7 @@ class FileParser:
             return resultado
 
     # =========================================================================
-    # Formato B — 17 columnas con encabezado (el formato real del sistema)
+    # Formato B — 17 columnas con encabezado
     # =========================================================================
     def _parsear_formato_b(self, df_input: pd.DataFrame, resultado: ParseResult) -> ParseResult:
         resultado.advertencias.append("Formato B detectado (17 cols con id_empresa).")
@@ -152,12 +149,11 @@ class FileParser:
         df['haber_raw']      = df_input['haber'].str.strip()
         df['centro_costo']   = df_input['ccosto'].str.strip()
 
-        # tipo_subcuenta y nro_subcuenta vienen como "3.0", "11.0" → limpiar a "3", "11"
         def limpiar_float_int(v):
             try:
                 f = float(v)
                 return str(int(f)) if f == int(f) else v
-            except:
+            except Exception:
                 return v
 
         df['tipo_subcuenta'] = df['tipo_subcuenta'].apply(
@@ -192,12 +188,13 @@ class FileParser:
     # Procesamiento común para ambos formatos
     # =========================================================================
     def _procesar_df_comun(self, df: pd.DataFrame, resultado: ParseResult) -> ParseResult:
+
         # Limpiar filas vacías
         df = df.dropna(how='all')
         df = df[df['fecha_raw'].str.strip().str.len() > 0].copy()
         df = df.reset_index(drop=True)
 
-        # Parsear fecha (soporta DD/MM/YYYY y YYYY/MM/DD)
+        # ── Fecha ─────────────────────────────────────────────────────────────
         df['fecha'] = pd.to_datetime(df['fecha_raw'], format='%d/%m/%Y', errors='coerce')
         mask_no_parsed = df['fecha'].isna()
         if mask_no_parsed.any():
@@ -207,9 +204,10 @@ class FileParser:
         n_fecha_inv = df['fecha'].isna().sum()
         if n_fecha_inv > 0:
             resultado.errores.append(
-                f"{n_fecha_inv} fila(s) con fecha inválida. Formatos aceptados: DD/MM/YYYY o YYYY/MM/DD.")
+                f"{n_fecha_inv} fila(s) con fecha inválida. "
+                f"Formatos aceptados: DD/MM/YYYY o YYYY/MM/DD.")
 
-        # Período
+        # ── Período ───────────────────────────────────────────────────────────
         primer_fecha = df['fecha'].dropna().iloc[0] if not df['fecha'].dropna().empty else None
         if primer_fecha is not None:
             resultado.periodo_anio = int(primer_fecha.year)
@@ -218,31 +216,85 @@ class FileParser:
             if len(periodos) > 1:
                 resultado.advertencias.append(
                     f"El archivo contiene {len(periodos)} períodos: "
-                    f"{', '.join(f'{a}/{m:02d}' for a, m in sorted(periodos))}. Se procesarán todos.")
+                    f"{', '.join(f'{a}/{m:02d}' for a, m in sorted(periodos))}. "
+                    f"Se procesarán todos.")
 
-        # Cuenta codigo
+        # ── Cuenta código ─────────────────────────────────────────────────────
         df['cuenta_codigo'] = pd.to_numeric(df['cuenta_codigo'], errors='coerce')
-        n_cta_inv = df['cuenta_codigo'].isna().sum()
-        if n_cta_inv > 0:
-            resultado.errores.append(f"{n_cta_inv} fila(s) con cuenta_codigo inválido o vacío.")
+        mask_cta_inv = df['cuenta_codigo'].isna()
+        if mask_cta_inv.any():
+            filas_inv = df[mask_cta_inv]
+            detalle = []
+            for _, row in filas_inv.iterrows():
+                fecha   = self._fmt_fecha(row.get('fecha'))
+                asiento = row.get('nro_asiento', '—')
+                renglon = row.get('nro_renglon', '—')
+                valor   = row.get('cuenta_codigo_raw', str(row.get('cuenta_codigo', '')))
+                detalle.append(
+                    f"    • fecha={fecha} | asiento={asiento} | "
+                    f"renglon={renglon} | valor='{valor}'"
+                )
+            resultado.errores.append(
+                f"{mask_cta_inv.sum()} fila(s) con cuenta_codigo inválido o vacío:\n"
+                + "\n".join(detalle)
+            )
 
-        # Montos
+        # ── Montos: debe y haber ──────────────────────────────────────────────
         df['debe']  = df['debe_raw'].apply(self._parsear_monto)
         df['haber'] = df['haber_raw'].apply(self._parsear_monto)
 
-        if df['debe'].isna().sum() > 0:
-            resultado.errores.append(f"{df['debe'].isna().sum()} fila(s) con valor 'debe' inválido.")
-        if df['haber'].isna().sum() > 0:
-            resultado.errores.append(f"{df['haber'].isna().sum()} fila(s) con valor 'haber' inválido.")
+        # Errores en debe
+        mask_debe_inv = df['debe'].isna()
+        if mask_debe_inv.any():
+            filas_inv = df[mask_debe_inv]
+            detalle = []
+            for _, row in filas_inv.iterrows():
+                fecha   = self._fmt_fecha(row.get('fecha'))
+                asiento = row.get('nro_asiento', '—')
+                renglon = row.get('nro_renglon', '—')
+                cuenta  = row.get('cuenta_codigo', '—')
+                valor   = str(row.get('debe_raw', '')).strip()
+                desc    = str(row.get('descripcion', '') or '').strip()[:40]
+                detalle.append(
+                    f"    • fecha={fecha} | asiento={asiento} | renglon={renglon} | "
+                    f"cuenta={cuenta} | valor='{valor}'"
+                    + (f" | {desc}" if desc else "")
+                )
+            resultado.errores.append(
+                f"{mask_debe_inv.sum()} fila(s) con valor no numérico en columna 'debe':\n"
+                + "\n".join(detalle)
+            )
 
+        # Errores en haber
+        mask_haber_inv = df['haber'].isna()
+        if mask_haber_inv.any():
+            filas_inv = df[mask_haber_inv]
+            detalle = []
+            for _, row in filas_inv.iterrows():
+                fecha   = self._fmt_fecha(row.get('fecha'))
+                asiento = row.get('nro_asiento', '—')
+                renglon = row.get('nro_renglon', '—')
+                cuenta  = row.get('cuenta_codigo', '—')
+                valor   = str(row.get('haber_raw', '')).strip()
+                desc    = str(row.get('descripcion', '') or '').strip()[:40]
+                detalle.append(
+                    f"    • fecha={fecha} | asiento={asiento} | renglon={renglon} | "
+                    f"cuenta={cuenta} | valor='{valor}'"
+                    + (f" | {desc}" if desc else "")
+                )
+            resultado.errores.append(
+                f"{mask_haber_inv.sum()} fila(s) con valor no numérico en columna 'haber':\n"
+                + "\n".join(detalle)
+            )
+
+        # ── Normalizar nullables ───────────────────────────────────────────────
         df_raw_out = df[['debe_raw', 'haber_raw']].copy()
 
-        # Normalizar nullables
         for col in ['tipo_asiento', 'tipo_subcuenta', 'nro_subcuenta', 'centro_costo',
                     'nro_asiento', 'nro_renglon', 'descripcion']:
             df[col] = df[col].replace({'': None, 'nan': None})
 
-        # Contexto
+        # ── Contexto ──────────────────────────────────────────────────────────
         df['empresa_id']   = resultado.empresa_id
         df['periodo_anio'] = df['fecha'].dt.year
         df['periodo_mes']  = df['fecha'].dt.month
@@ -253,7 +305,7 @@ class FileParser:
             'debe', 'haber', 'descripcion', 'tipo_subcuenta', 'nro_subcuenta', 'centro_costo'
         ]].copy()
 
-        # Filtrar inválidos
+        # ── Filtrar inválidos ─────────────────────────────────────────────────
         mask_validas = (
             df_final['fecha'].notna() &
             df_final['cuenta_codigo'].notna() &
@@ -277,9 +329,20 @@ class FileParser:
         resultado.dataframe_raw       = df_raw_out
         resultado.ok = len(resultado.errores) == 0
 
-        log.info(f"Parseo {'OK' if resultado.ok else 'CON ERRORES'} (formato {resultado.formato}) — "
-                 f"{resultado.total_filas_validas} filas válidas")
+        log.info(
+            f"Parseo {'OK' if resultado.ok else 'CON ERRORES'} "
+            f"(formato {resultado.formato}) — {resultado.total_filas_validas} filas válidas"
+        )
         return resultado
+
+    # ── Helpers ───────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _fmt_fecha(fecha) -> str:
+        try:
+            return pd.Timestamp(fecha).strftime('%d/%m/%Y')
+        except Exception:
+            return '—'
 
     @staticmethod
     def _parsear_monto(valor: str) -> Optional[float]:
