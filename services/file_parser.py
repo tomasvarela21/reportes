@@ -3,22 +3,19 @@ file_parser.py
 ==============
 Parser de archivos CSV del Libro Diario para ReporteApp v2.
 
-Columnas del CSV (22 columnas, índice 0-21):
-  0  Fecasi          -> fecha
-  1  tipo_asiento    -> (descartado)
-  2  nro_asiento     -> nro_asiento
-  3  Nro_renglon     -> nro_renglon  (usado para detectar duplicados reales)
-  4  referencia      -> (descartado)
-  5  descrip_movs    -> descripcion
-  6  nro_cta         -> cuenta_codigo (INTEGER)
-  7  desc_pdc        -> (descartado)
-  8  subs_descrip    -> (descartado)
-  9  tipo_subcta     -> tipo_subcuenta (nullable)
-  10 nro_subcuenta   -> nro_subcuenta (nullable)
-  11-18              -> (descartados)
-  19 debe            -> debe (NUMERIC 18,2)
-  20 haber           -> haber (NUMERIC 18,2) conservar signo negativo
-  21 ccosto          -> centro_costo (nullable)
+Soporta dos formatos:
+
+FORMATO A — 22 columnas (posicional, sin encabezado empresa):
+  0  Fecasi, 1 tipo_asiento, 2 nro_asiento, 3 Nro_renglon, 4 referencia,
+  5  descrip_movs, 6 nro_cta, 7 desc_pdc, 8 subs_descrip, 9 tipo_subcta,
+  10 nro_subcuenta, 11-18 descartados, 19 debe, 20 haber, 21 ccosto
+  → empresa se toma del selector
+
+FORMATO B — 17 columnas con encabezado (formato exportación sistema):
+  id_empresa, fecasi, tipo_asiento, nro_asiento, Nro_renglon, referencia,
+  nro_cta, descrip_movs, descrip_asis, nombre, debe, haber, feccar,
+  tipo_subcta, nro_subcuenta, subs_descrip, ccosto
+  → empresa_id se toma de id_empresa (columna del archivo)
 """
 
 import io
@@ -29,19 +26,23 @@ import pandas as pd
 
 log = logging.getLogger(__name__)
 
-COL_FECHA          = 0
-COL_NRO_ASIENTO    = 2
-COL_NRO_RENGLON    = 3
-COL_DESCRIPCION    = 5
-COL_CUENTA_CODIGO  = 6
-COL_TIPO_SUBCUENTA = 9
-COL_NRO_SUBCUENTA  = 10
-COL_DEBE           = 19
-COL_HABER          = 20
-COL_CENTRO_COSTO   = 21
+# Mapeo nombre → empresa_id
+EMPRESAS = {
+    'BATIA':     1,
+    'GUARE':     3,
+    'NORFORK':   2,
+    'TORRES':    4,
+    'WERCOLICH': 5,
+}
 
-TOTAL_COLUMNAS_ESPERADAS = 22
-EMPRESAS_CONOCIDAS = ['BATIA', 'GUARE', 'NORFORK', 'TORRES', 'WERCOLICH']
+COLS_FORMATO_A = 22
+COLS_FORMATO_B = 17
+COLS_FORMATO_B_NAMES = [
+    'id_empresa', 'fecasi', 'tipo_asiento', 'nro_asiento', 'Nro_renglon',
+    'referencia', 'nro_cta', 'descrip_movs', 'descrip_asis', 'nombre',
+    'debe', 'haber', 'feccar', 'tipo_subcta', 'nro_subcuenta',
+    'subs_descrip', 'ccosto'
+]
 
 
 @dataclass
@@ -53,8 +54,10 @@ class ParseResult:
     advertencias: list = field(default_factory=list)
     total_filas_raw: int = 0
     total_filas_validas: int = 0
-    empresa: str = ""
-    empresa_detectada: Optional[str] = None  # empresa detectada del nombre del archivo
+    empresa_id: int = 0
+    empresa_nombre: str = ""
+    empresa_detectada: Optional[str] = None
+    formato: str = ""          # 'A' o 'B'
     periodo_anio: Optional[int] = None
     periodo_mes: Optional[int] = None
 
@@ -66,22 +69,24 @@ class FileParser:
 
     @staticmethod
     def detectar_empresa(nombre_archivo: str) -> Optional[str]:
-        """
-        Intenta detectar el código de empresa a partir del nombre del archivo.
-        Retorna el código si lo encuentra, None si no puede determinarlo.
-        """
         nombre_upper = nombre_archivo.upper()
-        for emp in EMPRESAS_CONOCIDAS:
+        for emp in EMPRESAS:
             if emp in nombre_upper:
                 return emp
         return None
 
-    def parsear(self, archivo, empresa: str) -> ParseResult:
-        resultado = ParseResult(ok=False, empresa=empresa)
-        errores = []
-        advertencias = []
+    @staticmethod
+    def empresa_id_desde_nombre(nombre: str) -> Optional[int]:
+        return EMPRESAS.get(nombre.upper().strip())
 
-        # Detectar empresa del nombre del archivo si está disponible
+    def parsear(self, archivo, empresa_nombre: str) -> ParseResult:
+        empresa_id = self.empresa_id_desde_nombre(empresa_nombre)
+        if empresa_id is None:
+            r = ParseResult(ok=False)
+            r.errores.append(f"Empresa desconocida: '{empresa_nombre}'. Válidas: {list(EMPRESAS.keys())}")
+            return r
+
+        resultado = ParseResult(ok=False, empresa_id=empresa_id, empresa_nombre=empresa_nombre)
         nombre_archivo = getattr(archivo, 'name', '') or ''
         resultado.empresa_detectada = self.detectar_empresa(nombre_archivo)
 
@@ -103,45 +108,106 @@ class FileParser:
             return resultado
 
         resultado.total_filas_raw = len(df_input)
-        log.info(f"Archivo leído: {resultado.total_filas_raw} filas, {len(df_input.columns)} columnas")
+        n_cols = len(df_input.columns)
+        log.info(f"Archivo leído: {resultado.total_filas_raw} filas, {n_cols} columnas")
 
-        # Validar columnas
-        if len(df_input.columns) < TOTAL_COLUMNAS_ESPERADAS:
-            errores.append(
-                f"El archivo tiene {len(df_input.columns)} columnas, "
-                f"se esperan {TOTAL_COLUMNAS_ESPERADAS}. "
+        # Detectar formato
+        cols_lower = [c.lower().strip() for c in df_input.columns]
+        es_formato_b = 'id_empresa' in cols_lower and n_cols == COLS_FORMATO_B
+
+        if es_formato_b:
+            resultado.formato = 'B'
+            return self._parsear_formato_b(df_input, resultado)
+        elif n_cols >= COLS_FORMATO_A:
+            resultado.formato = 'A'
+            if n_cols > COLS_FORMATO_A:
+                resultado.advertencias.append(
+                    f"El archivo tiene {n_cols} columnas. Se procesarán las primeras {COLS_FORMATO_A}.")
+                df_input = df_input.iloc[:, :COLS_FORMATO_A]
+            return self._parsear_formato_a(df_input, resultado)
+        else:
+            resultado.errores.append(
+                f"El archivo tiene {n_cols} columnas. "
+                f"Se esperan {COLS_FORMATO_A} (formato estándar) o {COLS_FORMATO_B} columnas "
+                f"con encabezado (formato exportación con id_empresa). "
                 f"Verificá que el separador sea punto y coma (;).")
-            resultado.errores = errores
             return resultado
-        if len(df_input.columns) > TOTAL_COLUMNAS_ESPERADAS:
-            advertencias.append(
-                f"El archivo tiene {len(df_input.columns)} columnas. "
-                f"Se procesarán solo las primeras {TOTAL_COLUMNAS_ESPERADAS}.")
-            df_input = df_input.iloc[:, :TOTAL_COLUMNAS_ESPERADAS]
 
-        # Extraer columnas por posición
+    # =========================================================================
+    # Formato B — 17 columnas con encabezado (el formato real del sistema)
+    # =========================================================================
+    def _parsear_formato_b(self, df_input: pd.DataFrame, resultado: ParseResult) -> ParseResult:
+        resultado.advertencias.append("Formato B detectado (17 cols con id_empresa).")
+
         df = pd.DataFrame()
-        df['fecha_raw']      = df_input.iloc[:, COL_FECHA].str.strip()
-        df['nro_asiento']    = df_input.iloc[:, COL_NRO_ASIENTO].str.strip()
-        df['nro_renglon']    = df_input.iloc[:, COL_NRO_RENGLON].str.strip()
-        df['descripcion']    = df_input.iloc[:, COL_DESCRIPCION].str.strip()
-        df['cuenta_codigo']  = df_input.iloc[:, COL_CUENTA_CODIGO].str.strip()
-        df['tipo_subcuenta'] = df_input.iloc[:, COL_TIPO_SUBCUENTA].str.strip()
-        df['nro_subcuenta']  = df_input.iloc[:, COL_NRO_SUBCUENTA].str.strip()
-        df['debe_raw']       = df_input.iloc[:, COL_DEBE].str.strip()
-        df['haber_raw']      = df_input.iloc[:, COL_HABER].str.strip()
-        df['centro_costo']   = df_input.iloc[:, COL_CENTRO_COSTO].str.strip()
+        df['fecha_raw']      = df_input['fecasi'].str.strip()
+        df['tipo_asiento']   = df_input['tipo_asiento'].str.strip()
+        df['nro_asiento']    = df_input['nro_asiento'].str.strip()
+        df['nro_renglon']    = df_input['Nro_renglon'].str.strip()
+        df['descripcion']    = df_input['descrip_movs'].str.strip()
+        df['cuenta_codigo']  = df_input['nro_cta'].str.strip()
+        df['tipo_subcuenta'] = df_input['tipo_subcta'].str.strip()
+        df['nro_subcuenta']  = df_input['nro_subcuenta'].str.strip()
+        df['debe_raw']       = df_input['debe'].str.strip()
+        df['haber_raw']      = df_input['haber'].str.strip()
+        df['centro_costo']   = df_input['ccosto'].str.strip()
 
+        # tipo_subcuenta y nro_subcuenta vienen como "3.0", "11.0" → limpiar a "3", "11"
+        def limpiar_float_int(v):
+            try:
+                f = float(v)
+                return str(int(f)) if f == int(f) else v
+            except:
+                return v
+
+        df['tipo_subcuenta'] = df['tipo_subcuenta'].apply(
+            lambda v: limpiar_float_int(v) if v.strip() not in ('', 'nan') else '')
+        df['nro_subcuenta'] = df['nro_subcuenta'].apply(
+            lambda v: limpiar_float_int(v) if v.strip() not in ('', 'nan') else '')
+        df['centro_costo'] = df['centro_costo'].apply(
+            lambda v: limpiar_float_int(v) if v.strip() not in ('', 'nan') else '')
+
+        return self._procesar_df_comun(df, resultado)
+
+    # =========================================================================
+    # Formato A — 22 columnas posicional
+    # =========================================================================
+    def _parsear_formato_a(self, df_input: pd.DataFrame, resultado: ParseResult) -> ParseResult:
+        df = pd.DataFrame()
+        df['fecha_raw']      = df_input.iloc[:, 0].str.strip()
+        df['tipo_asiento']   = df_input.iloc[:, 1].str.strip()
+        df['nro_asiento']    = df_input.iloc[:, 2].str.strip()
+        df['nro_renglon']    = df_input.iloc[:, 3].str.strip()
+        df['descripcion']    = df_input.iloc[:, 5].str.strip()
+        df['cuenta_codigo']  = df_input.iloc[:, 6].str.strip()
+        df['tipo_subcuenta'] = df_input.iloc[:, 9].str.strip()
+        df['nro_subcuenta']  = df_input.iloc[:, 10].str.strip()
+        df['debe_raw']       = df_input.iloc[:, 19].str.strip()
+        df['haber_raw']      = df_input.iloc[:, 20].str.strip()
+        df['centro_costo']   = df_input.iloc[:, 21].str.strip()
+
+        return self._procesar_df_comun(df, resultado)
+
+    # =========================================================================
+    # Procesamiento común para ambos formatos
+    # =========================================================================
+    def _procesar_df_comun(self, df: pd.DataFrame, resultado: ParseResult) -> ParseResult:
         # Limpiar filas vacías
         df = df.dropna(how='all')
-        df = df[df['fecha_raw'].str.len() > 0].copy()
+        df = df[df['fecha_raw'].str.strip().str.len() > 0].copy()
         df = df.reset_index(drop=True)
 
-        # Parsear fecha
+        # Parsear fecha (soporta DD/MM/YYYY y YYYY/MM/DD)
         df['fecha'] = pd.to_datetime(df['fecha_raw'], format='%d/%m/%Y', errors='coerce')
+        mask_no_parsed = df['fecha'].isna()
+        if mask_no_parsed.any():
+            df.loc[mask_no_parsed, 'fecha'] = pd.to_datetime(
+                df.loc[mask_no_parsed, 'fecha_raw'], format='%Y/%m/%d', errors='coerce')
+
         n_fecha_inv = df['fecha'].isna().sum()
         if n_fecha_inv > 0:
-            errores.append(f"{n_fecha_inv} fila(s) con fecha inválida. Formato esperado: DD/MM/YYYY.")
+            resultado.errores.append(
+                f"{n_fecha_inv} fila(s) con fecha inválida. Formatos aceptados: DD/MM/YYYY o YYYY/MM/DD.")
 
         # Período
         primer_fecha = df['fecha'].dropna().iloc[0] if not df['fecha'].dropna().empty else None
@@ -150,45 +216,41 @@ class FileParser:
             resultado.periodo_mes  = int(primer_fecha.month)
             periodos = df['fecha'].dropna().apply(lambda d: (d.year, d.month)).unique()
             if len(periodos) > 1:
-                advertencias.append(
-                    f"El archivo contiene {len(periodos)} períodos distintos: "
+                resultado.advertencias.append(
+                    f"El archivo contiene {len(periodos)} períodos: "
                     f"{', '.join(f'{a}/{m:02d}' for a, m in sorted(periodos))}. Se procesarán todos.")
 
         # Cuenta codigo
         df['cuenta_codigo'] = pd.to_numeric(df['cuenta_codigo'], errors='coerce')
         n_cta_inv = df['cuenta_codigo'].isna().sum()
         if n_cta_inv > 0:
-            errores.append(f"{n_cta_inv} fila(s) con cuenta_codigo inválido o vacío.")
+            resultado.errores.append(f"{n_cta_inv} fila(s) con cuenta_codigo inválido o vacío.")
 
         # Montos
         df['debe']  = df['debe_raw'].apply(self._parsear_monto)
         df['haber'] = df['haber_raw'].apply(self._parsear_monto)
 
-        filas_debe_inv  = df['debe'].isna().sum()
-        filas_haber_inv = df['haber'].isna().sum()
-        if filas_debe_inv > 0:
-            errores.append(f"{filas_debe_inv} fila(s) con valor 'debe' inválido.")
-        if filas_haber_inv > 0:
-            errores.append(f"{filas_haber_inv} fila(s) con valor 'haber' inválido.")
+        if df['debe'].isna().sum() > 0:
+            resultado.errores.append(f"{df['debe'].isna().sum()} fila(s) con valor 'debe' inválido.")
+        if df['haber'].isna().sum() > 0:
+            resultado.errores.append(f"{df['haber'].isna().sum()} fila(s) con valor 'haber' inválido.")
 
-        # Guardar raw ANTES de filtrar para mantener índices alineados
         df_raw_out = df[['debe_raw', 'haber_raw']].copy()
 
         # Normalizar nullables
-        for col in ['tipo_subcuenta', 'nro_subcuenta', 'centro_costo',
+        for col in ['tipo_asiento', 'tipo_subcuenta', 'nro_subcuenta', 'centro_costo',
                     'nro_asiento', 'nro_renglon', 'descripcion']:
-            df[col] = df[col].replace('', None)
+            df[col] = df[col].replace({'': None, 'nan': None})
 
-        # Columnas de contexto
-        df['empresa']      = empresa
+        # Contexto
+        df['empresa_id']   = resultado.empresa_id
         df['periodo_anio'] = df['fecha'].dt.year
         df['periodo_mes']  = df['fecha'].dt.month
 
-        # Columnas finales — nro_renglon incluido para deteccion de duplicados
         df_final = df[[
-            'empresa', 'fecha', 'periodo_anio', 'periodo_mes',
-            'nro_asiento', 'nro_renglon', 'cuenta_codigo', 'debe', 'haber',
-            'descripcion', 'tipo_subcuenta', 'nro_subcuenta', 'centro_costo'
+            'empresa_id', 'fecha', 'periodo_anio', 'periodo_mes',
+            'tipo_asiento', 'nro_asiento', 'nro_renglon', 'cuenta_codigo',
+            'debe', 'haber', 'descripcion', 'tipo_subcuenta', 'nro_subcuenta', 'centro_costo'
         ]].copy()
 
         # Filtrar inválidos
@@ -200,30 +262,23 @@ class FileParser:
         )
         n_desc = (~mask_validas).sum()
         if n_desc > 0:
-            advertencias.append(
-                f"{n_desc} fila(s) descartadas por datos críticos inválidos (fecha, cuenta o montos).")
+            resultado.advertencias.append(f"{n_desc} fila(s) descartadas por datos inválidos.")
 
-        # Alinear raw con válidas
         df_raw_out = df_raw_out[mask_validas].reset_index(drop=True)
         df_final   = df_final[mask_validas].copy().reset_index(drop=True)
 
-        # Tipos finales
         df_final['cuenta_codigo'] = df_final['cuenta_codigo'].astype(int)
         df_final['periodo_anio']  = df_final['periodo_anio'].astype(int)
         df_final['periodo_mes']   = df_final['periodo_mes'].astype(int)
+        df_final['empresa_id']    = df_final['empresa_id'].astype(int)
 
         resultado.total_filas_validas = len(df_final)
         resultado.dataframe           = df_final
         resultado.dataframe_raw       = df_raw_out
-        resultado.errores             = errores
-        resultado.advertencias        = advertencias
-        resultado.ok = len(errores) == 0
+        resultado.ok = len(resultado.errores) == 0
 
-        if resultado.ok:
-            log.info(f"Parseo OK — {resultado.total_filas_validas} filas válidas ({resultado.periodo_anio}/{resultado.periodo_mes:02d})")
-        else:
-            log.warning(f"Parseo con errores: {errores}")
-
+        log.info(f"Parseo {'OK' if resultado.ok else 'CON ERRORES'} (formato {resultado.formato}) — "
+                 f"{resultado.total_filas_validas} filas válidas")
         return resultado
 
     @staticmethod
@@ -231,13 +286,11 @@ class FileParser:
         if not isinstance(valor, str):
             return None
         valor = valor.strip()
-        if valor == '' or valor == '-':
+        if valor in ('', '-'):
             return 0.0
         try:
             if ',' in valor:
                 valor = valor.replace('.', '').replace(',', '.')
-            elif len(valor.split('.')) > 1:
-                valor = valor.replace('.', '')
             return float(valor)
         except (ValueError, AttributeError):
             return None
