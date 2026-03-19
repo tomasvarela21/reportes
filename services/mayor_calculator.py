@@ -189,10 +189,10 @@ class MayorCalculator:
         })
         for r in registros_subcuenta:
             c = r['cuenta_codigo']
-            cuenta_totales[c]['debe']           += r['total_debe']
-            cuenta_totales[c]['haber']          += r['total_haber']
-            cuenta_totales[c]['saldo_anterior'] += r['saldo_anterior']
-            cuenta_totales[c]['saldo_periodo']  += r['saldo_periodo']
+            cuenta_totales[c]['debe']            += r['total_debe']
+            cuenta_totales[c]['haber']           += r['total_haber']
+            cuenta_totales[c]['saldo_anterior']  += r['saldo_anterior']
+            cuenta_totales[c]['saldo_periodo']   += r['saldo_periodo']
             cuenta_totales[c]['saldo_acumulado'] += r['saldo_acumulado']
 
         registros_cuenta = [{
@@ -204,11 +204,11 @@ class MayorCalculator:
             'tipo_subcuenta':  None,
             'nro_subcuenta':   None,
             'centro_costo':    None,
-            'total_debe':      round(t['debe'],           2),
-            'total_haber':     round(t['haber'],          2),
-            'saldo_anterior':  round(t['saldo_anterior'], 2),
-            'saldo_periodo':   round(t['saldo_periodo'],  2),
-            'saldo_acumulado': round(t['saldo_acumulado'],2),
+            'total_debe':      round(t['debe'],            2),
+            'total_haber':     round(t['haber'],           2),
+            'saldo_anterior':  round(t['saldo_anterior'],  2),
+            'saldo_periodo':   round(t['saldo_periodo'],   2),
+            'saldo_acumulado': round(t['saldo_acumulado'], 2),
         } for cta, t in cuenta_totales.items()]
 
         todos = registros_subcuenta + registros_cuenta
@@ -256,7 +256,16 @@ class MayorCalculator:
 
     @staticmethod
     def _key(cuenta, tipo_subcuenta, nro_subcuenta, centro_costo) -> tuple:
-        return (int(cuenta), tipo_subcuenta or '', nro_subcuenta or '', centro_costo or '')
+        """
+        Normaliza los componentes de la clave para garantizar consistencia
+        entre libro_diario (donde '0' puede venir del sistema origen),
+        saldos_apertura (donde NULL viene de limpiar_tipo_subcta) y
+        libro_mayor. Trata '0', '0.0', NULL y '' como equivalentes (sin dato).
+        """
+        def norm(v):
+            s = str(v).strip() if v is not None else ''
+            return '' if s in ('', '0', '0.0', 'nan') else s
+        return (int(cuenta), norm(tipo_subcuenta), norm(nro_subcuenta), norm(centro_costo))
 
     def close(self):
         if not self._conn_externo:
