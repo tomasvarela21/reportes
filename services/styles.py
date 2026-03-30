@@ -4,7 +4,6 @@ services/styles.py
 import os
 import streamlit as st
 
-# Directorio raíz del proyecto (donde está Home.py)
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 SIDEBAR_CSS = """
@@ -18,6 +17,7 @@ GLOBAL_CSS = """
 [data-testid="stDecoration"] { display: none; }
 #MainMenu                    { visibility: hidden; }
 footer                       { visibility: hidden; }
+[data-testid="manage-app-button"] { display: none !important; }
 
 [data-testid="stAppViewContainer"] > .main > .block-container {
     padding-top: 1.5rem;
@@ -43,7 +43,6 @@ h1, h2, h3 { color: #1a1f2e; }
 .reporte-card .card-desc  { color: #6b7280; font-size: 0.75rem; }
 """
 
-# Siempre con "/" — requerido por st.page_link en todos los SO
 NAV_LINKS = [
     ("🏠", "Home",            "Home.py"),
     ("📤", "Carga Diario",    "pages/1_Carga_Diario.py"),
@@ -54,8 +53,6 @@ NAV_LINKS = [
 ]
 
 def _existe(rel_path: str) -> bool:
-    """Verifica existencia usando path absoluto, compatible con Windows y Linux."""
-    # Convertir separadores para el SO actual
     abs_path = os.path.join(_ROOT, rel_path.replace("/", os.sep))
     return os.path.exists(abs_path)
 
