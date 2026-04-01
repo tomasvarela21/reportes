@@ -18,6 +18,12 @@ EMPRESAS = {
     'WERCOLICH': 5,
 }
 
+TIPOS_CUENTA = ["Activo","Pasivo","Patrimonio","Resultado"]
+
+def tipo_es_resultado(tipo: str) -> bool:
+    """Devuelve True si el tipo implica es_resultado = 'S'."""
+    return tipo == "Resultado"
+
 # ── Helpers de DB ──────────────────────────────────────────────────────────────
 
 def get_plan_cuentas(conn):
@@ -208,12 +214,10 @@ def parsear_plan_cuentas(archivo) -> tuple:
             df[col] = None
 
     def parse_bool_activa(v):
-        # activa es boolean en DB
         if v is None: return None
         return str(v).strip().upper() in ('S', 'SI', 'TRUE', '1', 'YES')
 
     def parse_bool_sn(v):
-        # es_resultado es VARCHAR(1) 'S'/'N' en DB
         if v is None: return None
         return 'S' if str(v).strip().upper() in ('S', 'SI', 'TRUE', '1', 'YES') else 'N'
 
@@ -542,17 +546,32 @@ with tabs[1]:
         else:
             fases_final_edit = fases_sel
 
-        c1, c2, c3 = st.columns(3)
-        tipo_edit = c1.selectbox("Tipo", ["Activo","Pasivo","Patrimonio","Resultado"],
-                                 index=["Activo","Pasivo","Patrimonio","Resultado"].index(cuenta['Tipo'])
-                                 if cuenta['Tipo'] in ["Activo","Pasivo","Patrimonio","Resultado"] else 0,
-                                 key=f"edit_tipo_{nro_edit}")
-        moneda_edit = c2.selectbox("Moneda", ["ARS","USD","EUR"],
-                                   index=["ARS","USD","EUR"].index(cuenta['Moneda'])
-                                   if cuenta['Moneda'] in ["ARS","USD","EUR"] else 0,
-                                   key=f"edit_moneda_{nro_edit}")
+        c1, c2, c3, c4 = st.columns(4)
 
-        if c3.button("💾 Guardar cambios", type="primary", key=f"btn_edit_{nro_edit}"):
+        # Tipo — al cambiar, auto-ajusta es_resultado
+        tipo_actual_edit = cuenta['Tipo'] if cuenta['Tipo'] in TIPOS_CUENTA else "Activo"
+        tipo_edit = c1.selectbox(
+            "Tipo *", TIPOS_CUENTA,
+            index=TIPOS_CUENTA.index(tipo_actual_edit),
+            key=f"edit_tipo_{nro_edit}"
+        )
+
+        moneda_edit = c2.selectbox(
+            "Moneda", ["ARS","USD","EUR"],
+            index=["ARS","USD","EUR"].index(cuenta['Moneda']) if cuenta['Moneda'] in ["ARS","USD","EUR"] else 0,
+            key=f"edit_moneda_{nro_edit}"
+        )
+
+        # Es Resultado — se auto-selecciona según el Tipo elegido en esta corrida
+        es_resultado_por_tipo = "Resultado" if tipo_es_resultado(tipo_edit) else "No Resultado"
+        es_resultado_sel_edit = c3.selectbox(
+            "Es Resultado", ["No Resultado", "Resultado"],
+            index=["No Resultado","Resultado"].index(es_resultado_por_tipo),
+            key=f"edit_es_resultado_{nro_edit}"
+        )
+        es_resultado_edit = "S" if es_resultado_sel_edit == "Resultado" else "N"
+
+        if c4.button("💾 Guardar cambios", type="primary", key=f"btn_edit_{nro_edit}"):
             errores_edit = []
             if not nombre_edit.strip(): errores_edit.append("El nombre es obligatorio.")
             if not rubro_final_edit:    errores_edit.append("El rubro es obligatorio.")
@@ -566,19 +585,24 @@ with tabs[1]:
                     cur.execute("""
                         UPDATE dim_cuenta
                         SET nombre=%s, extendido=%s, rubro=%s, sub_rubro=%s,
-                            analisis=%s, fases=%s, tipo=%s, moneda=%s
+                            analisis=%s, fases=%s, tipo=%s, moneda=%s, es_resultado=%s
                         WHERE nro_cta=%s
                     """, (nombre_edit.strip() or None, extendido_edit.strip() or None,
                           rubro_final_edit or None, subrubro_final_edit or None,
                           analisis_final_edit or None, fases_final_edit or None,
-                          tipo_edit, moneda_edit, nro_edit))
+                          tipo_edit, moneda_edit, es_resultado_edit, nro_edit))
                     conn.commit(); cur.close()
-                    st.success(f"✅ Cuenta **{nro_edit}** actualizada correctamente.")
+                    st.session_state['msg_cuenta_edit'] = f"✅ Cuenta **{nro_edit} — {nombre_edit.strip()}** actualizada correctamente."
                     st.rerun()
                 except Exception as e:
                     conn.rollback(); st.error(f"Error: {e}")
 
     st.divider()
+
+    # ── Mensaje éxito editar/nueva cuenta ─────────────────────────────────────
+    for _mk in ['msg_cuenta_edit', 'msg_cuenta_nueva']:
+        if _mk in st.session_state:
+            st.success(st.session_state.pop(_mk))
 
     # ── Alta de cuenta nueva ───────────────────────────────────────────────────
     with st.expander("➕ Agregar nueva cuenta"):
@@ -588,8 +612,20 @@ with tabs[1]:
         nombre_new    = c3.text_input("Nombre *", placeholder="ej: Maquinaria y Equipo", key="new_nombre")
 
         c1, c2, c3, c4, c5 = st.columns(5)
-        tipo_new   = c4.selectbox("Tipo *",  ["Activo","Pasivo","Patrimonio","Resultado"], key="new_tipo")
-        moneda_new = c5.selectbox("Moneda",  ["ARS","USD","EUR"], key="new_moneda")
+
+        # Tipo — controla auto-selección de es_resultado
+        tipo_new = c3.selectbox("Tipo *", TIPOS_CUENTA, key="new_tipo")
+
+        # Es Resultado — se auto-selecciona según tipo_new
+        es_resultado_por_tipo_new = "Resultado" if tipo_es_resultado(tipo_new) else "No Resultado"
+        es_resultado_sel_new = c4.selectbox(
+            "Es Resultado", ["No Resultado", "Resultado"],
+            index=["No Resultado","Resultado"].index(es_resultado_por_tipo_new),
+            key="new_es_resultado"
+        )
+        es_resultado_new = "S" if es_resultado_sel_new == "Resultado" else "N"
+
+        moneda_new = c5.selectbox("Moneda", ["ARS","USD","EUR"], key="new_moneda")
 
         opts_rubro_new = rubros + ["✨ + Nuevo rubro..."]
         rubro_sel_new = c1.selectbox("Rubro *", opts_rubro_new, index=0, key="new_rubro_sel")
@@ -626,7 +662,7 @@ with tabs[1]:
         analisis_final_new = ""
         if subrubro_final_new and not es_rubro_nuevo_new:
             opts_an_new = ["— Sin análisis —"] + analisis_new_list + ["✨ + Nuevo análisis..."]
-            an_sel_new = c3.selectbox("Análisis", opts_an_new, key="new_analisis_sel")
+            an_sel_new = st.selectbox("Análisis", opts_an_new, key="new_analisis_sel")
             if an_sel_new == "✨ + Nuevo análisis...":
                 nuevo_an_new = st.text_input("Nombre del análisis *", key="new_nuevo_an_nom")
                 if nuevo_an_new and validar_analisis_nuevo(conn, subrubro_final_new, nuevo_an_new):
@@ -637,11 +673,10 @@ with tabs[1]:
             else:
                 analisis_final_new = an_sel_new
         elif subrubro_final_new:
-            analisis_final_new = c3.text_input("Análisis (opcional)", key="new_analisis_libre")
+            analisis_final_new = st.text_input("Análisis (opcional)", key="new_analisis_libre")
 
         opts_fases_new = ["— Sin fases —"] + fases_all + ["✨ + Nueva fase..."]
-        fases_sel_new = c3.selectbox("Fases", opts_fases_new, key="new_fases_sel") if not subrubro_final_new \
-                        else st.selectbox("Fases", opts_fases_new, key="new_fases_sel2")
+        fases_sel_new = st.selectbox("Fases", opts_fases_new, key="new_fases_sel")
         if fases_sel_new == "✨ + Nueva fase...":
             fases_final_new = st.text_input("Nombre de la fase *", key="new_nueva_fase")
         elif fases_sel_new == "— Sin fases —":
@@ -661,14 +696,15 @@ with tabs[1]:
                     cur = conn.cursor()
                     cur.execute("""
                         INSERT INTO dim_cuenta
-                            (nro_cta, extendido, nombre, rubro, sub_rubro, analisis, fases, tipo, moneda)
-                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                            (nro_cta, extendido, nombre, rubro, sub_rubro, analisis, fases,
+                             tipo, moneda, es_resultado)
+                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                     """, (nro_cta_new, extendido_new.strip() or None, nombre_new.strip(),
                           rubro_final_new.strip() or None, subrubro_final_new.strip() or None,
                           analisis_final_new.strip() or None, fases_final_new.strip() or None,
-                          tipo_new, moneda_new))
+                          tipo_new, moneda_new, es_resultado_new))
                     conn.commit(); cur.close()
-                    st.success(f"✅ Cuenta **{nro_cta_new} — {nombre_new}** agregada al plan.")
+                    st.session_state['msg_cuenta_nueva'] = f"✅ Cuenta **{nro_cta_new} — {nombre_new.strip()}** agregada al plan de cuentas."
                     st.rerun()
                 except Exception as e:
                     conn.rollback(); st.error(f"Error: {e}")
@@ -680,7 +716,7 @@ with tabs[2]:
 
     if 'plan_cargado' in st.session_state:
         r = st.session_state['plan_cargado']
-        st.success(f"✅ Plan actualizado correctamente desde **{r['archivo']}**")
+        st.success(f"✅ Plan actualizado correctamente desde **{r['archivo']}** — {r['nuevas']} cuentas nuevas, {r['actualizadas']} actualizadas.")
         st.divider()
         c1, c2, c3 = st.columns(3)
         c1.metric("Cuentas nuevas",       r['nuevas'])
@@ -775,7 +811,7 @@ with tabs[3]:
 
     if 'proyectos_cargados' in st.session_state:
         r = st.session_state['proyectos_cargados']
-        st.success(f"✅ Proyectos actualizados desde **{r['archivo']}**")
+        st.success(f"✅ Proyectos actualizados desde **{r['archivo']}** — {r['nuevos']} nuevos, {r['actualizados']} actualizados.")
         st.divider()
         c1, c2, c3 = st.columns(3)
         c1.metric("Proyectos nuevos",       r['nuevos'])
@@ -862,29 +898,39 @@ with tabs[4]:
     st.metric("Total centros", len(df_cc))
     st.dataframe(df_cc, use_container_width=True, hide_index=True)
 
+    if 'msg_centro_nuevo' in st.session_state:
+        st.success(st.session_state.pop('msg_centro_nuevo'))
+
     with st.expander("➕ Agregar centro de costo"):
         ca1, ca2, ca3 = st.columns(3)
         cod_new  = ca1.text_input("Código",      key="new_cc_cod")
         desc_new = ca2.text_input("Descripción", key="new_cc_desc")
         emp_new  = ca3.selectbox("Empresa (opcional)", ["—"] + list(EMPRESAS.keys()), key="new_cc_emp")
         if st.button("Guardar centro", key="btn_nuevo_cc"):
-            cur = conn.cursor()
-            cur.execute("SELECT 1 FROM dim_centro_costo WHERE codigo = %s", (cod_new.strip(),))
-            if cur.fetchone():
-                st.error(f"❌ El código **{cod_new}** ya existe en centros de costo.")
+            errores_cc = []
+            if not cod_new.strip():  errores_cc.append("El código es obligatorio.")
+            if not desc_new.strip(): errores_cc.append("La descripción es obligatoria.")
+            if errores_cc:
+                for e in errores_cc: st.error(f"❌ {e}")
             else:
+                cur = conn.cursor()
                 try:
-                    emp_id_new = EMPRESAS[emp_new] if emp_new != "—" else None
-                    cur.execute("""
-                        INSERT INTO dim_centro_costo (codigo, descripcion, empresa_id)
-                        VALUES (%s,%s,%s)
-                    """, (cod_new.strip(), desc_new.strip(), emp_id_new))
-                    conn.commit()
-                    st.success(f"✅ Centro **{cod_new}** agregado.")
-                    st.rerun()
+                    cur.execute("SELECT 1 FROM dim_centro_costo WHERE codigo = %s", (cod_new.strip(),))
+                    if cur.fetchone():
+                        st.error(f"❌ El código **{cod_new.strip()}** ya existe en centros de costo.")
+                    else:
+                        emp_id_new = EMPRESAS[emp_new] if emp_new != "—" else None
+                        cur.execute("""
+                            INSERT INTO dim_centro_costo (codigo, descripcion, empresa_id)
+                            VALUES (%s,%s,%s)
+                        """, (cod_new.strip(), desc_new.strip(), emp_id_new))
+                        conn.commit()
+                        st.session_state['msg_centro_nuevo'] = f"✅ Centro de costo **{cod_new.strip()}** agregado correctamente."
+                        st.rerun()
                 except Exception as e:
-                    conn.rollback(); st.error(f"Error: {e}")
-            cur.close()
+                    conn.rollback(); st.error(f"❌ Error: {e}")
+                finally:
+                    cur.close()
 
 # ── Tab 6: Log Recálculos ──────────────────────────────────────────────────────
 with tabs[5]:
