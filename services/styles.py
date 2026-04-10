@@ -48,7 +48,7 @@ NAV_LINKS = [
     ("📤", "Carga Diario",    "pages/1_Carga_Diario.py"),
     ("📚", "Libro Mayor",     "pages/2_Libro_Mayor.py"),
     ("📋", "Consulta Diario", "pages/3_Consulta_Diario.py"),
-    ("🏦", "Saldos Apertura", "pages/4_Saldos_Apertura.py"),
+    ("🔍", "Data Check",      "pages/6_Chequeo_Consistencia.py"),
     ("⚙️", "Administracion",  "pages/5_Administracion.py"),
 ]
 
