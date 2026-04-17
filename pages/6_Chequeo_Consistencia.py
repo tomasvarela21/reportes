@@ -123,17 +123,17 @@ def cargar_staging(conn, df_total: pd.DataFrame):
     conn.commit(); cur.close()
 
 def run_comparacion(conn, empresas_ids: list, anio: int, mes: int) -> pd.DataFrame:
-    """Ejecuta el FULL OUTER JOIN y devuelve todas las diferencias."""
+    """Ejecuta el FULL OUTER JOIN filtrando estrictamente por período del staging."""
     cur = conn.cursor()
     cur.execute("""
         SELECT
-            COALESCE(csv.empresa_id, lm.empresa_id)                     AS empresa_id,
-            COALESCE(csv.cuenta_codigo, lm.cuenta_codigo)               AS cuenta_codigo,
+            COALESCE(csv.empresa_id, lm.empresa_id)                      AS empresa_id,
+            COALESCE(csv.cuenta_codigo, lm.cuenta_codigo)                AS cuenta_codigo,
             COALESCE(csv.descripcion, dc.nombre, lm.cuenta_codigo::text) AS descripcion,
-            csv.saldo_no_ajustado                                        AS saldo_csv,
-            lm.saldo_acumulado                                           AS saldo_db,
+            csv.saldo_no_ajustado                                         AS saldo_csv,
+            lm.saldo_acumulado                                            AS saldo_db,
             ROUND((COALESCE(csv.saldo_no_ajustado,0)
-                   - COALESCE(lm.saldo_acumulado,0))::numeric, 2)       AS diferencia,
+                   - COALESCE(lm.saldo_acumulado,0))::numeric, 2)        AS diferencia,
             CASE
                 WHEN csv.cuenta_codigo IS NULL THEN 'Solo en DB'
                 WHEN lm.cuenta_codigo  IS NULL THEN 'Solo en CSV'
@@ -149,11 +149,15 @@ def run_comparacion(conn, empresas_ids: list, anio: int, mes: int) -> pd.DataFra
         LEFT JOIN dim_cuenta dc
             ON  dc.nro_cta = COALESCE(csv.cuenta_codigo, lm.cuenta_codigo)
         WHERE
-            csv.empresa_id = ANY(%s) OR lm.empresa_id = ANY(%s)
+            -- Lado CSV: solo el período cargado en staging
+            (csv.empresa_id = ANY(%s) AND csv.periodo_anio = %s AND csv.periodo_mes = %s)
+            OR
+            -- Lado DB: solo el mismo período (evita traer todos los períodos históricos)
+            (lm.empresa_id = ANY(%s) AND lm.periodo_anio = %s AND lm.periodo_mes = %s AND lm.nivel = 'cuenta')
         ORDER BY
             COALESCE(csv.empresa_id, lm.empresa_id),
             ABS(COALESCE(csv.saldo_no_ajustado,0) - COALESCE(lm.saldo_acumulado,0)) DESC
-    """, (empresas_ids, empresas_ids))
+    """, (empresas_ids, anio, mes, empresas_ids, anio, mes))
     rows = cur.fetchall(); cur.close()
     df = pd.DataFrame(rows, columns=[
         'empresa_id','cuenta_codigo','descripcion',
