@@ -21,7 +21,6 @@ EMPRESAS = {
 TIPOS_CUENTA = ["Activo","Pasivo","Patrimonio","Resultado"]
 
 def tipo_es_resultado(tipo: str) -> bool:
-    """Devuelve True si el tipo implica es_resultado = 'S'."""
     return tipo == "Resultado"
 
 # ── Helpers de DB ──────────────────────────────────────────────────────────────
@@ -102,6 +101,16 @@ def get_cuentas_faltantes_diario(conn, nros_plan: set) -> list:
     cur.close()
     return sorted(en_diario - nros_plan)
 
+def get_nombres_actuales(conn, nros_cta: list) -> dict:
+    """Devuelve {nro_cta: nombre} para las cuentas indicadas."""
+    if not nros_cta:
+        return {}
+    cur = conn.cursor()
+    cur.execute("SELECT nro_cta, nombre FROM dim_cuenta WHERE nro_cta = ANY(%s)", (nros_cta,))
+    result = {r[0]: r[1] for r in cur.fetchall()}
+    cur.close()
+    return result
+
 def get_proyectos(conn):
     cur = conn.cursor()
     cur.execute("""
@@ -127,6 +136,11 @@ def validar_cuenta_nueva(conn, nro_cta, nombre):
     if cur.fetchone():
         errores.append(f"Ya existe una cuenta con el nombre **{nombre}**.")
     cur.close(); return errores
+
+def cuenta_tiene_movimientos(conn, nro_cta: int) -> int:
+    cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) FROM libro_diario WHERE cuenta_codigo = %s", (nro_cta,))
+    count = cur.fetchone()[0]; cur.close(); return count
 
 def validar_rubro_nuevo(conn, rubro_nombre):
     cur = conn.cursor()
@@ -547,22 +561,17 @@ with tabs[1]:
             fases_final_edit = fases_sel
 
         c1, c2, c3, c4 = st.columns(4)
-
-        # Tipo — al cambiar, auto-ajusta es_resultado
         tipo_actual_edit = cuenta['Tipo'] if cuenta['Tipo'] in TIPOS_CUENTA else "Activo"
         tipo_edit = c1.selectbox(
             "Tipo *", TIPOS_CUENTA,
             index=TIPOS_CUENTA.index(tipo_actual_edit),
             key=f"edit_tipo_{nro_edit}"
         )
-
         moneda_edit = c2.selectbox(
             "Moneda", ["ARS","USD","EUR"],
             index=["ARS","USD","EUR"].index(cuenta['Moneda']) if cuenta['Moneda'] in ["ARS","USD","EUR"] else 0,
             key=f"edit_moneda_{nro_edit}"
         )
-
-        # Es Resultado — se auto-selecciona según el Tipo elegido en esta corrida
         es_resultado_por_tipo = "Resultado" if tipo_es_resultado(tipo_edit) else "No Resultado"
         es_resultado_sel_edit = c3.selectbox(
             "Es Resultado", ["No Resultado", "Resultado"],
@@ -600,7 +609,7 @@ with tabs[1]:
     st.divider()
 
     # ── Mensaje éxito editar/nueva cuenta ─────────────────────────────────────
-    for _mk in ['msg_cuenta_edit', 'msg_cuenta_nueva']:
+    for _mk in ['msg_cuenta_edit', 'msg_cuenta_nueva', 'msg_cuenta_eliminada']:
         if _mk in st.session_state:
             st.success(st.session_state.pop(_mk))
 
@@ -612,11 +621,7 @@ with tabs[1]:
         nombre_new    = c3.text_input("Nombre *", placeholder="ej: Maquinaria y Equipo", key="new_nombre")
 
         c1, c2, c3, c4, c5 = st.columns(5)
-
-        # Tipo — controla auto-selección de es_resultado
         tipo_new = c3.selectbox("Tipo *", TIPOS_CUENTA, key="new_tipo")
-
-        # Es Resultado — se auto-selecciona según tipo_new
         es_resultado_por_tipo_new = "Resultado" if tipo_es_resultado(tipo_new) else "No Resultado"
         es_resultado_sel_new = c4.selectbox(
             "Es Resultado", ["No Resultado", "Resultado"],
@@ -624,7 +629,6 @@ with tabs[1]:
             key="new_es_resultado"
         )
         es_resultado_new = "S" if es_resultado_sel_new == "Resultado" else "N"
-
         moneda_new = c5.selectbox("Moneda", ["ARS","USD","EUR"], key="new_moneda")
 
         opts_rubro_new = rubros + ["✨ + Nuevo rubro..."]
@@ -709,6 +713,43 @@ with tabs[1]:
                 except Exception as e:
                     conn.rollback(); st.error(f"Error: {e}")
 
+    # ── Eliminar cuenta ────────────────────────────────────────────────────────
+    st.divider()
+    with st.expander("🗑️ Eliminar cuenta"):
+        st.caption("Solo se pueden eliminar cuentas que no tengan movimientos en el Libro Diario.")
+        opciones_eliminar = ["— Seleccioná una cuenta —"] + [
+            f"{int(r['Nro Cta'])} — {r['Nombre']}" for _, r in df_cta.iterrows()
+        ]
+        sel_eliminar = st.selectbox("Cuenta a eliminar", opciones_eliminar, key="sel_eliminar")
+        if sel_eliminar != "— Seleccioná una cuenta —":
+            nro_del = int(sel_eliminar.split(" — ")[0])
+            cuenta_del = df_cta[df_cta['Nro Cta'] == nro_del].iloc[0]
+            st.markdown(f"""
+            | Campo | Valor |
+            |---|---|
+            | **Nro Cta** | {nro_del} |
+            | **Nombre** | {cuenta_del['Nombre']} |
+            | **Rubro** | {cuenta_del['Rubro'] or '—'} |
+            | **Tipo** | {cuenta_del['Tipo'] or '—'} |
+            | **Extendido** | {cuenta_del['Extendido'] or '—'} |
+            """)
+            n_movimientos = cuenta_tiene_movimientos(conn, nro_del)
+            if n_movimientos > 0:
+                st.error(f"❌ La cuenta **{nro_del}** tiene **{n_movimientos} movimiento(s)** en el Libro Diario y no puede eliminarse.")
+            else:
+                st.warning(f"⚠️ Esta acción es **irreversible**. La cuenta **{nro_del} — {cuenta_del['Nombre']}** será eliminada permanentemente del plan.")
+                confirmar_del = st.checkbox(f"Confirmo que quiero eliminar la cuenta **{nro_del} — {cuenta_del['Nombre']}**", key=f"confirm_del_{nro_del}")
+                if confirmar_del:
+                    if st.button("🗑️ Eliminar cuenta", type="primary", key=f"btn_del_{nro_del}"):
+                        try:
+                            cur = conn.cursor()
+                            cur.execute("DELETE FROM dim_cuenta WHERE nro_cta = %s", (nro_del,))
+                            conn.commit(); cur.close()
+                            st.session_state['msg_cuenta_eliminada'] = f"✅ Cuenta **{nro_del} — {cuenta_del['Nombre']}** eliminada del plan de cuentas."
+                            st.rerun()
+                        except Exception as e:
+                            conn.rollback(); st.error(f"❌ Error al eliminar: {e}")
+
 # ── Tab 3: Actualizar Plan ─────────────────────────────────────────────────────
 with tabs[2]:
     st.subheader("📥 Actualizar Plan de Cuentas")
@@ -716,12 +757,13 @@ with tabs[2]:
 
     if 'plan_cargado' in st.session_state:
         r = st.session_state['plan_cargado']
-        st.success(f"✅ Plan actualizado correctamente desde **{r['archivo']}** — {r['nuevas']} cuentas nuevas, {r['actualizadas']} actualizadas.")
+        st.success(f"✅ Plan actualizado correctamente desde **{r['archivo']}** — {r['nuevas']} cuentas nuevas, {r['actualizadas']} actualizadas, {r['renombradas']} renombradas.")
         st.divider()
-        c1, c2, c3 = st.columns(3)
+        c1, c2, c3, c4 = st.columns(4)
         c1.metric("Cuentas nuevas",       r['nuevas'])
-        c2.metric("Cuentas actualizadas", r['actualizadas'])
-        c3.metric("Total procesadas",     r['nuevas'] + r['actualizadas'])
+        c2.metric("Actualizadas",         r['actualizadas'])
+        c3.metric("Renombradas",          r['renombradas'])
+        c4.metric("Total procesadas",     r['nuevas'] + r['actualizadas'])
         st.divider()
         if st.button("📥 Cargar otro archivo", type="primary"):
             st.session_state.pop('plan_cargado', None); st.rerun()
@@ -760,10 +802,41 @@ with tabs[2]:
         en_db = {r[0] for r in cur.fetchall()}; cur.close()
         en_archivo = set(df_plan['nro_cta'].tolist())
 
+        cuentas_existentes = en_archivo & en_db
+        cuentas_nuevas     = en_archivo - en_db
+
         st.divider()
         c1, c2 = st.columns(2)
-        c1.metric("Cuentas nuevas a agregar",        len(en_archivo - en_db))
-        c2.metric("Cuentas existentes a actualizar", len(en_archivo & en_db))
+        c1.metric("Cuentas nuevas a agregar",        len(cuentas_nuevas))
+        c2.metric("Cuentas existentes a actualizar", len(cuentas_existentes))
+
+        # ── Detección de cambios de nombre ────────────────────────────────────
+        nombres_db = get_nombres_actuales(conn, list(cuentas_existentes))
+        df_existentes = df_plan[df_plan['nro_cta'].isin(cuentas_existentes)].copy()
+
+        renombradas = []
+        for _, row in df_existentes.iterrows():
+            nro = int(row['nro_cta'])
+            nombre_nuevo = row.get('nombre') or ''
+            nombre_actual = nombres_db.get(nro) or ''
+            if nombre_nuevo.strip().lower() != nombre_actual.strip().lower() and nombre_nuevo.strip():
+                renombradas.append({
+                    'Nro Cta':        nro,
+                    'Nombre actual':  nombre_actual,
+                    'Nombre nuevo':   nombre_nuevo.strip(),
+                })
+
+        if renombradas:
+            st.divider()
+            df_renombradas = pd.DataFrame(renombradas)
+            st.warning(f"✏️ **{len(renombradas)} cuenta(s) con cambio de nombre** — revisá antes de aplicar.")
+            st.dataframe(df_renombradas, use_container_width=True, hide_index=True)
+            confirmar_renombres = st.checkbox(
+                f"✅ Confirmo los {len(renombradas)} cambios de nombre listados arriba.",
+                key="confirmar_renombres"
+            )
+        else:
+            confirmar_renombres = True  # sin cambios de nombre, no bloquea
 
         st.divider()
         st.markdown("#### 🔍 Validación contra Libro Diario")
@@ -792,17 +865,23 @@ with tabs[2]:
             continuar = True
 
         st.divider()
-        if continuar:
+        if continuar and confirmar_renombres:
             if st.button("📥 Aplicar actualización del plan", type="primary"):
                 conn2 = get_conn()
                 with st.spinner("Actualizando plan de cuentas..."):
                     try:
                         n_nuevas, n_act = aplicar_upsert_plan(conn2, df_plan)
                         st.session_state['plan_cargado'] = {
-                            'archivo': archivo_plan.name, 'nuevas': n_nuevas, 'actualizadas': n_act}
+                            'archivo':    archivo_plan.name,
+                            'nuevas':     n_nuevas,
+                            'actualizadas': n_act,
+                            'renombradas':  len(renombradas),
+                        }
                         st.rerun()
                     except Exception as e:
                         st.error(f"❌ Error al actualizar: {e}")
+        elif not confirmar_renombres:
+            st.info("ℹ️ Confirmá los cambios de nombre para habilitar la actualización.")
 
 # ── Tab 4: Proyectos ───────────────────────────────────────────────────────────
 with tabs[3]:
