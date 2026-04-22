@@ -1,4 +1,4 @@
-import os, sys, streamlit as st, pandas as pd, psycopg2.extras
+import os, sys, re, streamlit as st, pandas as pd, psycopg2.extras
 from dotenv import load_dotenv
 from services.db import get_conn
 from services.styles import apply_styles, render_sidebar
@@ -20,21 +20,49 @@ EMPRESAS = {
 
 TIPOS_CUENTA = ["Activo","Pasivo","Patrimonio","Resultado"]
 
+# Columnas fijas de dim_cuenta — orden y etiqueta de display
+COLS_FIJAS = [
+    ('nro_cta',      'Nro Cta'),
+    ('extendido',    'Extendido'),
+    ('nombre',       'Nombre'),
+    ('rubro',        'Rubro'),
+    ('sub_rubro',    'Sub-rubro'),
+    ('analisis',     'Analisis'),
+    ('fases',        'Fases'),
+    ('tipo',         'Tipo'),
+    ('moneda',       'Moneda'),
+    ('activa',       'Activa'),
+    ('es_resultado', 'Es Resultado'),
+    ('nivel_1',      'Nivel 1'),
+    ('nivel_2',      'Nivel 2'),
+    ('nivel_3',      'Nivel 3'),
+]
+COLS_FIJAS_NAMES = {c for c, _ in COLS_FIJAS}
+
 def tipo_es_resultado(tipo: str) -> bool:
     return tipo == "Resultado"
 
 # ── Helpers de DB ──────────────────────────────────────────────────────────────
 
-def get_plan_cuentas(conn):
+def get_columnas_dim_cuenta(conn) -> list:
+    """Devuelve todas las columnas actuales de dim_cuenta en Neon."""
     cur = conn.cursor()
     cur.execute("""
-        SELECT nro_cta, extendido, nombre, rubro, sub_rubro, analisis, fases,
-               tipo, moneda, activa, es_resultado, nivel_1, nivel_2, nivel_3
-        FROM dim_cuenta ORDER BY nro_cta
+        SELECT column_name FROM information_schema.columns
+        WHERE table_name = 'dim_cuenta'
+        ORDER BY ordinal_position
     """)
-    cols = ['Nro Cta','Extendido','Nombre','Rubro','Sub-rubro','Analisis','Fases',
-            'Tipo','Moneda','Activa','Es Resultado','Nivel 1','Nivel 2','Nivel 3']
-    df = pd.DataFrame(cur.fetchall(), columns=cols); cur.close(); return df
+    cols = [r[0] for r in cur.fetchall()]; cur.close(); return cols
+
+def get_plan_cuentas(conn):
+    """Trae todas las columnas de dim_cuenta, incluyendo las extra agregadas dinámicamente."""
+    cols_db = get_columnas_dim_cuenta(conn)
+    cols_extra = [c for c in cols_db if c not in COLS_FIJAS_NAMES]
+    todas  = [c for c, _ in COLS_FIJAS] + cols_extra
+    labels = [lbl for _, lbl in COLS_FIJAS] + [c.replace('_',' ').title() for c in cols_extra]
+    cur = conn.cursor()
+    cur.execute(f"SELECT {', '.join(todas)} FROM dim_cuenta ORDER BY nro_cta")
+    df = pd.DataFrame(cur.fetchall(), columns=labels); cur.close(); return df
 
 def get_rubros(conn):
     cur = conn.cursor()
@@ -103,13 +131,10 @@ def get_cuentas_faltantes_diario(conn, nros_plan: set) -> list:
 
 def get_nombres_actuales(conn, nros_cta: list) -> dict:
     """Devuelve {nro_cta: nombre} para las cuentas indicadas."""
-    if not nros_cta:
-        return {}
+    if not nros_cta: return {}
     cur = conn.cursor()
     cur.execute("SELECT nro_cta, nombre FROM dim_cuenta WHERE nro_cta = ANY(%s)", (nros_cta,))
-    result = {r[0]: r[1] for r in cur.fetchall()}
-    cur.close()
-    return result
+    result = {r[0]: r[1] for r in cur.fetchall()}; cur.close(); return result
 
 def get_proyectos(conn):
     cur = conn.cursor()
@@ -130,11 +155,9 @@ def validar_cuenta_nueva(conn, nro_cta, nombre):
     errores = []
     cur = conn.cursor()
     cur.execute("SELECT 1 FROM dim_cuenta WHERE nro_cta = %s", (nro_cta,))
-    if cur.fetchone():
-        errores.append(f"El Nro de cuenta **{nro_cta}** ya existe en el plan.")
+    if cur.fetchone(): errores.append(f"El Nro de cuenta **{nro_cta}** ya existe en el plan.")
     cur.execute("SELECT 1 FROM dim_cuenta WHERE LOWER(nombre) = LOWER(%s)", (nombre,))
-    if cur.fetchone():
-        errores.append(f"Ya existe una cuenta con el nombre **{nombre}**.")
+    if cur.fetchone(): errores.append(f"Ya existe una cuenta con el nombre **{nombre}**.")
     cur.close(); return errores
 
 def cuenta_tiene_movimientos(conn, nro_cta: int) -> int:
@@ -149,24 +172,61 @@ def validar_rubro_nuevo(conn, rubro_nombre):
 
 def validar_subrubro_nuevo(conn, rubro, subrubro_nombre):
     cur = conn.cursor()
-    cur.execute("""
-        SELECT 1 FROM dim_cuenta
-        WHERE LOWER(rubro) = LOWER(%s) AND LOWER(sub_rubro) = LOWER(%s)
-    """, (rubro, subrubro_nombre))
+    cur.execute("SELECT 1 FROM dim_cuenta WHERE LOWER(rubro)=%s AND LOWER(sub_rubro)=%s",
+                (rubro, subrubro_nombre))
     existe = cur.fetchone() is not None; cur.close(); return existe
 
 def validar_analisis_nuevo(conn, subrubro, analisis_nombre):
     cur = conn.cursor()
-    cur.execute("""
-        SELECT 1 FROM dim_cuenta
-        WHERE LOWER(sub_rubro) = LOWER(%s) AND LOWER(analisis) = LOWER(%s)
-    """, (subrubro, analisis_nombre))
+    cur.execute("SELECT 1 FROM dim_cuenta WHERE LOWER(sub_rubro)=%s AND LOWER(analisis)=%s",
+                (subrubro, analisis_nombre))
     existe = cur.fetchone() is not None; cur.close(); return existe
 
+# ── Helpers para columnas dinámicas ───────────────────────────────────────────
+
+def inferir_tipo_sql(serie: pd.Series) -> str:
+    """Infiere el tipo SQL más adecuado para una columna nueva del archivo."""
+    valores = serie.dropna().astype(str).str.strip()
+    valores = valores[valores != '']
+    if valores.empty: return "TEXT"
+    if set(valores.str.upper().unique()) <= {'S','N','SI','NO','TRUE','FALSE','1','0'}:
+        return "VARCHAR(1)"
+    if valores.str.len().max() <= 1: return "VARCHAR(1)"
+    try: valores.astype(int); return "INTEGER"
+    except (ValueError, TypeError): pass
+    try: valores.str.replace(',','.').astype(float); return "NUMERIC(18,2)"
+    except (ValueError, TypeError): pass
+    return "VARCHAR(100)" if valores.str.len().max() <= 50 else "TEXT"
+
+def normalizar_nombre_columna(nombre: str) -> str:
+    """Convierte nombre de columna del archivo a snake_case para la DB."""
+    s = nombre.strip().lower()
+    s = re.sub(r'[^a-z0-9]+', '_', s)
+    return s.strip('_')
+
+def agregar_columnas_nuevas(conn, cols_nuevas: list) -> list:
+    """Ejecuta ALTER TABLE para cada columna nueva. Retorna las agregadas."""
+    if not cols_nuevas: return []
+    cur = conn.cursor()
+    agregadas = []
+    for col_db, tipo_sql in cols_nuevas:
+        try:
+            cur.execute(
+                f"ALTER TABLE dim_cuenta ADD COLUMN IF NOT EXISTS {col_db} {tipo_sql}"
+            )
+            agregadas.append((col_db, tipo_sql))
+        except Exception as e:
+            conn.rollback(); cur.close()
+            raise RuntimeError(f"Error al agregar columna '{col_db}': {e}")
+    conn.commit(); cur.close(); return agregadas
 
 # ── Parsers ───────────────────────────────────────────────────────────────────
 
 def parsear_plan_cuentas(archivo) -> tuple:
+    """Parsea el archivo del plan de cuentas.
+    Retorna: (df, errores, advertencias, cols_extra_normalized)
+    cols_extra_normalized: {nombre_archivo: nombre_db} para columnas nuevas detectadas.
+    """
     errores = []; advertencias = []
     nombre = getattr(archivo, 'name', '')
     try:
@@ -184,12 +244,13 @@ def parsear_plan_cuentas(archivo) -> tuple:
                     continue
             else:
                 errores.append("No se pudo leer el archivo.")
-                return pd.DataFrame(), errores, advertencias
+                return pd.DataFrame(), errores, advertencias, {}
     except Exception as e:
         errores.append(f"Error al leer el archivo: {e}")
-        return pd.DataFrame(), errores, advertencias
+        return pd.DataFrame(), errores, advertencias, {}
 
     df.columns = [c.strip() for c in df.columns]
+
     col_map = {
         'nro_cta':'nro_cta','Nro Cta':'nro_cta','NroCta':'nro_cta',
         'Extendido':'extendido','extendido':'extendido',
@@ -207,12 +268,13 @@ def parsear_plan_cuentas(archivo) -> tuple:
         'Nivel 3':'nivel_3','nivel_3':'nivel_3',
     }
     df = df.rename(columns={c: col_map[c] for c in df.columns if c in col_map})
+
     if 'nro_cta' not in df.columns:
         errores.append("No se encontró columna de número de cuenta.")
-        return pd.DataFrame(), errores, advertencias
+        return pd.DataFrame(), errores, advertencias, {}
     if 'nombre' not in df.columns:
         errores.append("No se encontró columna 'Nombre'.")
-        return pd.DataFrame(), errores, advertencias
+        return pd.DataFrame(), errores, advertencias, {}
 
     df['nro_cta'] = pd.to_numeric(df['nro_cta'].astype(str).str.strip(), errors='coerce')
     n_inv = df['nro_cta'].isna().sum()
@@ -235,15 +297,8 @@ def parsear_plan_cuentas(archivo) -> tuple:
         if v is None: return None
         return 'S' if str(v).strip().upper() in ('S', 'SI', 'TRUE', '1', 'YES') else 'N'
 
-    if 'activa' in df.columns:
-        df['activa'] = df['activa'].apply(parse_bool_activa)
-    else:
-        df['activa'] = None
-
-    if 'es_resultado' in df.columns:
-        df['es_resultado'] = df['es_resultado'].apply(parse_bool_sn)
-    else:
-        df['es_resultado'] = None
+    df['activa']       = df['activa'].apply(parse_bool_activa)       if 'activa'       in df.columns else None
+    df['es_resultado'] = df['es_resultado'].apply(parse_bool_sn)     if 'es_resultado' in df.columns else None
 
     for col in ['nivel_1', 'nivel_2', 'nivel_3']:
         if col in df.columns:
@@ -252,9 +307,30 @@ def parsear_plan_cuentas(archivo) -> tuple:
             df[col] = None
 
     df = df.drop_duplicates(subset=['nro_cta'], keep='last')
-    cols_out = ['nro_cta','extendido','nombre','rubro','sub_rubro','analisis','fases',
-                'tipo','moneda','activa','es_resultado','nivel_1','nivel_2','nivel_3']
-    return df[[c for c in cols_out if c in df.columns]].copy(), errores, advertencias
+
+    # ── Detectar columnas extra (no mapeadas) ──────────────────────────────────
+    cols_ya_en_fijas = set(col_map.values()) | COLS_FIJAS_NAMES
+    cols_extra_archivo = [
+        c for c in df.columns
+        if c not in cols_ya_en_fijas and not c.startswith('_')
+    ]
+
+    cols_extra_normalized = {}  # {nombre_archivo: nombre_db}
+    for c in cols_extra_archivo:
+        col_db = normalizar_nombre_columna(c)
+        if col_db and col_db not in COLS_FIJAS_NAMES:
+            cols_extra_normalized[c] = col_db
+            df = df.rename(columns={c: col_db})
+
+    if cols_extra_normalized:
+        advertencias.append(
+            f"Columnas extra detectadas: "
+            f"{', '.join(f'{k} → {v}' for k,v in cols_extra_normalized.items())}"
+        )
+
+    cols_fijas_out = [c for c, _ in COLS_FIJAS]
+    cols_out = cols_fijas_out + list(cols_extra_normalized.values())
+    return df[[c for c in cols_out if c in df.columns]].copy(), errores, advertencias, cols_extra_normalized
 
 
 def parsear_proyectos(archivo) -> tuple:
@@ -275,15 +351,12 @@ def parsear_proyectos(archivo) -> tuple:
                 errores.append("No se pudo leer el archivo.")
                 return pd.DataFrame(), errores, advertencias
     except Exception as e:
-        errores.append(f"Error: {e}")
-        return pd.DataFrame(), errores, advertencias
+        errores.append(f"Error: {e}"); return pd.DataFrame(), errores, advertencias
 
     df.columns = [c.strip() for c in df.columns]
     col_map = {
-        'ccosto':'ccosto','Ccosto':'ccosto',
-        'Nombre':'nombre','nombre':'nombre',
-        'fcInicio':'fc_inicio','fc_inicio':'fc_inicio',
-        'fcFin':'fc_fin','fc_fin':'fc_fin',
+        'ccosto':'ccosto','Ccosto':'ccosto','Nombre':'nombre','nombre':'nombre',
+        'fcInicio':'fc_inicio','fc_inicio':'fc_inicio','fcFin':'fc_fin','fc_fin':'fc_fin',
         'Ingresos':'ingresos','ingresos':'ingresos',
         'cto_Mo_Propia':'cto_mo_propia','cto_mo_propia':'cto_mo_propia',
         'cto_Mo_Terceros':'cto_mo_terceros','cto_mo_terceros':'cto_mo_terceros',
@@ -291,86 +364,110 @@ def parsear_proyectos(archivo) -> tuple:
         'cto_Herramientas':'cto_herramientas','cto_herramientas':'cto_herramientas',
         'cto_Diversos':'cto_diversos','cto_diversos':'cto_diversos',
         'Superficie':'superficie','superficie':'superficie',
-        'Avance':'avance','avance':'avance',
-        'Horas':'horas','horas':'horas',
+        'Avance':'avance','avance':'avance','Horas':'horas','horas':'horas',
     }
     df = df.rename(columns={c: col_map[c] for c in df.columns if c in col_map})
-
     if 'ccosto' not in df.columns:
-        errores.append("No se encontró columna 'ccosto'.")
-        return pd.DataFrame(), errores, advertencias
+        errores.append("No se encontró columna 'ccosto'."); return pd.DataFrame(), errores, advertencias
     if 'nombre' not in df.columns:
-        errores.append("No se encontró columna 'Nombre'.")
-        return pd.DataFrame(), errores, advertencias
+        errores.append("No se encontró columna 'Nombre'."); return pd.DataFrame(), errores, advertencias
 
     df['ccosto'] = df['ccosto'].astype(str).str.strip()
     df = df[df['ccosto'].str.len() > 0].copy()
 
-    for col in ['fc_inicio', 'fc_fin']:
-        if col in df.columns:
-            df[col] = pd.to_datetime(df[col], errors='coerce').dt.date
-        else:
-            df[col] = None
+    for col in ['fc_inicio','fc_fin']:
+        df[col] = pd.to_datetime(df[col], errors='coerce').dt.date if col in df.columns else None
 
     def parse_num(v):
-        if v is None or str(v).strip() in ('', 'nan', 'NaN', 'None'): return None
-        try: return float(str(v).replace(',', '.'))
+        if v is None or str(v).strip() in ('','nan','NaN','None'): return None
+        try: return float(str(v).replace(',','.'))
         except: return None
 
     for col in ['ingresos','cto_mo_propia','cto_mo_terceros','cto_materiales',
                 'cto_herramientas','cto_diversos','superficie','avance','horas']:
-        if col in df.columns:
-            df[col] = df[col].apply(parse_num)
-        else:
-            df[col] = None
+        df[col] = df[col].apply(parse_num) if col in df.columns else None
 
     df['nombre'] = df['nombre'].astype(str).str.strip()
     df = df.drop_duplicates(subset=['ccosto'], keep='last')
     advertencias.append(f"{len(df)} proyectos encontrados en el archivo.")
-
-    cols_out = ['ccosto','nombre','fc_inicio','fc_fin','ingresos',
-                'cto_mo_propia','cto_mo_terceros','cto_materiales',
-                'cto_herramientas','cto_diversos','superficie','avance','horas']
+    cols_out = ['ccosto','nombre','fc_inicio','fc_fin','ingresos','cto_mo_propia',
+                'cto_mo_terceros','cto_materiales','cto_herramientas','cto_diversos',
+                'superficie','avance','horas']
     return df[[c for c in cols_out if c in df.columns]].copy(), errores, advertencias
-
 
 # ── Upserts ───────────────────────────────────────────────────────────────────
 
-def aplicar_upsert_plan(conn, df: pd.DataFrame) -> tuple:
+def aplicar_upsert_plan(conn, df: pd.DataFrame,
+                        nros_excluir_renombre: set = None,
+                        cols_excluir: set = None) -> tuple:
+    """Upsert dinámico. Respeta exclusiones de renombres y columnas seleccionadas."""
+    nros_excluir_renombre = nros_excluir_renombre or set()
+    cols_excluir          = cols_excluir or set()
+
     cur = conn.cursor()
-    cur.execute("SELECT nro_cta FROM dim_cuenta")
-    existentes = {r[0] for r in cur.fetchall()}
-    nuevas = len(df[~df['nro_cta'].isin(existentes)])
+    cur.execute("SELECT nro_cta, nombre FROM dim_cuenta")
+    existentes = {r[0]: r[1] for r in cur.fetchall()}
+    nuevas       = len(df[~df['nro_cta'].isin(existentes)])
     actualizadas = len(df[df['nro_cta'].isin(existentes)])
 
-    psycopg2.extras.execute_values(cur, """
-        INSERT INTO dim_cuenta
-            (nro_cta, extendido, nombre, rubro, sub_rubro, analisis, fases,
-             tipo, moneda, activa, es_resultado, nivel_1, nivel_2, nivel_3)
-        VALUES %s
-        ON CONFLICT (nro_cta) DO UPDATE SET
+    COLS_FIJAS_INSERT = ['nro_cta','extendido','nombre','rubro','sub_rubro','analisis',
+                         'fases','tipo','moneda','activa','es_resultado',
+                         'nivel_1','nivel_2','nivel_3']
+
+    # Columnas extra activas (no excluidas por el usuario)
+    cols_extra_activas = [
+        c for c in df.columns
+        if c not in COLS_FIJAS_INSERT and c not in cols_excluir
+    ]
+    todas_cols = COLS_FIJAS_INSERT + cols_extra_activas
+
+    set_fijas = """
             extendido    = EXCLUDED.extendido,
-            nombre       = EXCLUDED.nombre,
             rubro        = EXCLUDED.rubro,
             sub_rubro    = EXCLUDED.sub_rubro,
             analisis     = EXCLUDED.analisis,
             fases        = EXCLUDED.fases,
             tipo         = EXCLUDED.tipo,
             moneda       = EXCLUDED.moneda,
-            activa       = COALESCE(EXCLUDED.activa,       dim_cuenta.activa),
+            activa       = COALESCE(EXCLUDED.activa,    dim_cuenta.activa),
             es_resultado = EXCLUDED.es_resultado,
-            nivel_1      = COALESCE(EXCLUDED.nivel_1,      dim_cuenta.nivel_1),
-            nivel_2      = COALESCE(EXCLUDED.nivel_2,      dim_cuenta.nivel_2),
-            nivel_3      = COALESCE(EXCLUDED.nivel_3,      dim_cuenta.nivel_3)
-    """, [
-        (int(r['nro_cta']), r.get('extendido'), r.get('nombre'),
-         r.get('rubro'), r.get('sub_rubro'), r.get('analisis'), r.get('fases'),
-         r.get('tipo'), r.get('moneda'), r.get('activa'), r.get('es_resultado'),
-         r.get('nivel_1') if pd.notna(r.get('nivel_1','')) else None,
-         r.get('nivel_2') if pd.notna(r.get('nivel_2','')) else None,
-         r.get('nivel_3') if pd.notna(r.get('nivel_3','')) else None)
-        for _, r in df.iterrows()
-    ], page_size=200)
+            nivel_1      = COALESCE(EXCLUDED.nivel_1,   dim_cuenta.nivel_1),
+            nivel_2      = COALESCE(EXCLUDED.nivel_2,   dim_cuenta.nivel_2),
+            nivel_3      = COALESCE(EXCLUDED.nivel_3,   dim_cuenta.nivel_3)"""
+    set_extra = ''.join(f',\n            {c} = EXCLUDED.{c}' for c in cols_extra_activas)
+
+    def limpiar_extra(v):
+        if v is None: return None
+        if isinstance(v, float) and pd.isna(v): return None
+        s = str(v).strip()
+        return None if s in ('','nan','NaN') else s
+
+    rows = []
+    for _, r in df.iterrows():
+        nro = int(r['nro_cta'])
+        # Si este nro está excluido de renombre, preservar nombre actual de la DB
+        nombre_final = existentes.get(nro, r.get('nombre')) \
+            if nro in nros_excluir_renombre else r.get('nombre')
+
+        row = [nro, r.get('extendido'), nombre_final,
+               r.get('rubro'), r.get('sub_rubro'), r.get('analisis'), r.get('fases'),
+               r.get('tipo'), r.get('moneda'), r.get('activa'), r.get('es_resultado'),
+               r.get('nivel_1') if pd.notna(r.get('nivel_1','')) else None,
+               r.get('nivel_2') if pd.notna(r.get('nivel_2','')) else None,
+               r.get('nivel_3') if pd.notna(r.get('nivel_3','')) else None]
+
+        for c in cols_extra_activas:
+            row.append(limpiar_extra(r.get(c)))
+        rows.append(tuple(row))
+
+    sql = f"""
+        INSERT INTO dim_cuenta ({', '.join(todas_cols)})
+        VALUES %s
+        ON CONFLICT (nro_cta) DO UPDATE SET
+            nombre       = EXCLUDED.nombre,
+            {set_fijas}{set_extra}
+    """
+    psycopg2.extras.execute_values(cur, sql, rows, page_size=200)
     conn.commit(); cur.close()
     return nuevas, actualizadas
 
@@ -382,28 +479,19 @@ def aplicar_upsert_proyectos(conn, df: pd.DataFrame) -> tuple:
     existentes = {r[0] for r in cur.fetchall()}
     nuevos = len(df[~df['ccosto'].isin(existentes)])
     actualizados = len(df[df['ccosto'].isin(existentes)])
-
     psycopg2.extras.execute_values(cur, """
         INSERT INTO proyectos
             (ccosto, nombre, fc_inicio, fc_fin, ingresos,
              cto_mo_propia, cto_mo_terceros, cto_materiales,
-             cto_herramientas, cto_diversos,
-             superficie, avance, horas, actualizado_en)
+             cto_herramientas, cto_diversos, superficie, avance, horas, actualizado_en)
         VALUES %s
         ON CONFLICT (ccosto) DO UPDATE SET
-            nombre           = EXCLUDED.nombre,
-            fc_inicio        = EXCLUDED.fc_inicio,
-            fc_fin           = EXCLUDED.fc_fin,
-            ingresos         = EXCLUDED.ingresos,
-            cto_mo_propia    = EXCLUDED.cto_mo_propia,
-            cto_mo_terceros  = EXCLUDED.cto_mo_terceros,
-            cto_materiales   = EXCLUDED.cto_materiales,
-            cto_herramientas = EXCLUDED.cto_herramientas,
-            cto_diversos     = EXCLUDED.cto_diversos,
-            superficie       = EXCLUDED.superficie,
-            avance           = EXCLUDED.avance,
-            horas            = EXCLUDED.horas,
-            actualizado_en   = now()
+            nombre=EXCLUDED.nombre, fc_inicio=EXCLUDED.fc_inicio, fc_fin=EXCLUDED.fc_fin,
+            ingresos=EXCLUDED.ingresos, cto_mo_propia=EXCLUDED.cto_mo_propia,
+            cto_mo_terceros=EXCLUDED.cto_mo_terceros, cto_materiales=EXCLUDED.cto_materiales,
+            cto_herramientas=EXCLUDED.cto_herramientas, cto_diversos=EXCLUDED.cto_diversos,
+            superficie=EXCLUDED.superficie, avance=EXCLUDED.avance,
+            horas=EXCLUDED.horas, actualizado_en=now()
     """, [
         (r['ccosto'], r['nombre'], r.get('fc_inicio'), r.get('fc_fin'),
          r.get('ingresos'), r.get('cto_mo_propia'), r.get('cto_mo_terceros'),
@@ -413,7 +501,6 @@ def aplicar_upsert_proyectos(conn, df: pd.DataFrame) -> tuple:
     ], page_size=100)
     conn.commit(); cur.close()
     return nuevos, actualizados
-
 
 # ── UI ─────────────────────────────────────────────────────────────────────────
 
@@ -430,24 +517,18 @@ tabs = st.tabs(["🏢 Empresas", "📒 Plan de Cuentas", "📥 Actualizar Plan",
 # ── Tab 1: Empresas ────────────────────────────────────────────────────────────
 with tabs[0]:
     st.subheader("Empresas activas")
-    try:
-        df_emp = get_empresas(conn)
-    except Exception:
-        conn = get_conn(); df_emp = get_empresas(conn)
+    try: df_emp = get_empresas(conn)
+    except Exception: conn = get_conn(); df_emp = get_empresas(conn)
     st.dataframe(df_emp, use_container_width=True, hide_index=True)
 
 # ── Tab 2: Plan de Cuentas ─────────────────────────────────────────────────────
 with tabs[1]:
     st.subheader("Plan de Cuentas")
     try:
-        df_cta = get_plan_cuentas(conn)
-        rubros = get_rubros(conn)
-        fases_all = get_fases(conn)
+        df_cta = get_plan_cuentas(conn); rubros = get_rubros(conn); fases_all = get_fases(conn)
     except Exception:
-        conn = get_conn()
-        df_cta = get_plan_cuentas(conn)
-        rubros = get_rubros(conn)
-        fases_all = get_fases(conn)
+        conn = get_conn(); df_cta = get_plan_cuentas(conn)
+        rubros = get_rubros(conn); fases_all = get_fases(conn)
 
     c1, c2, c3, c4 = st.columns(4)
     filt_cod  = c1.text_input("Buscar Nro Cta",  placeholder="ej: 1024", key="filt_cod")
@@ -456,14 +537,10 @@ with tabs[1]:
     filt_tipo = c4.selectbox("Tipo", ["Todos","Activo","Pasivo","Patrimonio","Resultado"], key="filt_tipo")
 
     df_show = df_cta.copy()
-    if filt_cod.strip():
-        df_show = df_show[df_show['Nro Cta'].astype(str).str.contains(filt_cod.strip())]
-    if filt_nom.strip():
-        df_show = df_show[df_show['Nombre'].str.contains(filt_nom.strip(), case=False, na=False)]
-    if filt_rub.strip():
-        df_show = df_show[df_show['Rubro'].str.contains(filt_rub.strip(), case=False, na=False)]
-    if filt_tipo != "Todos":
-        df_show = df_show[df_show['Tipo'].str.lower() == filt_tipo.lower()]
+    if filt_cod.strip(): df_show = df_show[df_show['Nro Cta'].astype(str).str.contains(filt_cod.strip())]
+    if filt_nom.strip(): df_show = df_show[df_show['Nombre'].str.contains(filt_nom.strip(), case=False, na=False)]
+    if filt_rub.strip(): df_show = df_show[df_show['Rubro'].str.contains(filt_rub.strip(), case=False, na=False)]
+    if filt_tipo != "Todos": df_show = df_show[df_show['Tipo'].str.lower() == filt_tipo.lower()]
 
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Total cuentas",    len(df_cta))
@@ -487,10 +564,10 @@ with tabs[1]:
         st.divider()
         st.markdown(f"### ✏️ Editando cuenta **{nro_edit}** — {cuenta['Nombre']}")
 
-        rubro_actual    = cuenta['Rubro']    or ""
+        rubro_actual    = cuenta['Rubro']     or ""
         subrubro_actual = cuenta['Sub-rubro'] or ""
-        analisis_actual = cuenta['Analisis'] or ""
-        fases_actual    = cuenta['Fases']    or ""
+        analisis_actual = cuenta['Analisis']  or ""
+        fases_actual    = cuenta['Fases']     or ""
 
         c1, c2 = st.columns([2, 1])
         nombre_edit    = c1.text_input("Nombre *", value=cuenta['Nombre'] or "", key=f"edit_nombre_{nro_edit}")
@@ -518,7 +595,7 @@ with tabs[1]:
         subrubro_final_edit = ""
         if rubro_final_edit and not es_rubro_nuevo:
             opts_sub = ["— Sin sub-rubro —"] + subrubros_edit + ["✨ + Nuevo sub-rubro..."]
-            idx_sub = (subrubros_edit.index(subrubro_actual) + 1) if subrubro_actual in subrubros_edit else 0
+            idx_sub = (subrubros_edit.index(subrubro_actual)+1) if subrubro_actual in subrubros_edit else 0
             sub_sel = c2.selectbox("Sub-rubro", opts_sub, index=idx_sub, key=f"edit_sub_{nro_edit}")
             if sub_sel == "✨ + Nuevo sub-rubro...":
                 nuevo_sub_edit = st.text_input("Nombre del sub-rubro *", key=f"edit_nuevo_sub_{nro_edit}")
@@ -536,48 +613,39 @@ with tabs[1]:
         analisis_final_edit = ""
         if subrubro_final_edit and not es_rubro_nuevo:
             opts_an = ["— Sin análisis —"] + analisis_edit_list + ["✨ + Nuevo análisis..."]
-            idx_an = (analisis_edit_list.index(analisis_actual) + 1) if analisis_actual in analisis_edit_list else 0
+            idx_an = (analisis_edit_list.index(analisis_actual)+1) if analisis_actual in analisis_edit_list else 0
             an_sel = c3.selectbox("Análisis", opts_an, index=idx_an, key=f"edit_an_{nro_edit}")
             if an_sel == "✨ + Nuevo análisis...":
                 nuevo_an_edit = st.text_input("Nombre del análisis *", key=f"edit_nuevo_an_{nro_edit}")
                 if nuevo_an_edit and validar_analisis_nuevo(conn, subrubro_final_edit, nuevo_an_edit):
                     st.error(f"❌ El análisis **{nuevo_an_edit}** ya existe en **{subrubro_final_edit}**.")
                 analisis_final_edit = nuevo_an_edit
-            elif an_sel == "— Sin análisis —":
-                analisis_final_edit = ""
-            else:
-                analisis_final_edit = an_sel
+            elif an_sel == "— Sin análisis —": analisis_final_edit = ""
+            else: analisis_final_edit = an_sel
         elif subrubro_final_edit:
             analisis_final_edit = c3.text_input("Análisis (opcional)", key=f"edit_an_libre_{nro_edit}")
 
         opts_fases = ["— Sin fases —"] + fases_all + ["✨ + Nueva fase..."]
-        idx_fases = (fases_all.index(fases_actual) + 1) if fases_actual in fases_all else 0
+        idx_fases = (fases_all.index(fases_actual)+1) if fases_actual in fases_all else 0
         fases_sel = c4.selectbox("Fases", opts_fases, index=idx_fases, key=f"edit_fases_{nro_edit}")
         if fases_sel == "✨ + Nueva fase...":
             fases_final_edit = st.text_input("Nombre de la fase *", key=f"edit_nueva_fase_{nro_edit}")
-        elif fases_sel == "— Sin fases —":
-            fases_final_edit = ""
-        else:
-            fases_final_edit = fases_sel
+        elif fases_sel == "— Sin fases —": fases_final_edit = ""
+        else: fases_final_edit = fases_sel
 
         c1, c2, c3, c4 = st.columns(4)
         tipo_actual_edit = cuenta['Tipo'] if cuenta['Tipo'] in TIPOS_CUENTA else "Activo"
-        tipo_edit = c1.selectbox(
-            "Tipo *", TIPOS_CUENTA,
-            index=TIPOS_CUENTA.index(tipo_actual_edit),
-            key=f"edit_tipo_{nro_edit}"
-        )
-        moneda_edit = c2.selectbox(
-            "Moneda", ["ARS","USD","EUR"],
-            index=["ARS","USD","EUR"].index(cuenta['Moneda']) if cuenta['Moneda'] in ["ARS","USD","EUR"] else 0,
-            key=f"edit_moneda_{nro_edit}"
-        )
+        tipo_edit = c1.selectbox("Tipo *", TIPOS_CUENTA,
+                                  index=TIPOS_CUENTA.index(tipo_actual_edit),
+                                  key=f"edit_tipo_{nro_edit}")
+        moneda_edit = c2.selectbox("Moneda", ["ARS","USD","EUR"],
+                                    index=["ARS","USD","EUR"].index(cuenta['Moneda'])
+                                    if cuenta['Moneda'] in ["ARS","USD","EUR"] else 0,
+                                    key=f"edit_moneda_{nro_edit}")
         es_resultado_por_tipo = "Resultado" if tipo_es_resultado(tipo_edit) else "No Resultado"
-        es_resultado_sel_edit = c3.selectbox(
-            "Es Resultado", ["No Resultado", "Resultado"],
-            index=["No Resultado","Resultado"].index(es_resultado_por_tipo),
-            key=f"edit_es_resultado_{nro_edit}"
-        )
+        es_resultado_sel_edit = c3.selectbox("Es Resultado", ["No Resultado","Resultado"],
+                                              index=["No Resultado","Resultado"].index(es_resultado_por_tipo),
+                                              key=f"edit_es_resultado_{nro_edit}")
         es_resultado_edit = "S" if es_resultado_sel_edit == "Resultado" else "N"
 
         if c4.button("💾 Guardar cambios", type="primary", key=f"btn_edit_{nro_edit}"):
@@ -607,11 +675,8 @@ with tabs[1]:
                     conn.rollback(); st.error(f"Error: {e}")
 
     st.divider()
-
-    # ── Mensaje éxito editar/nueva cuenta ─────────────────────────────────────
-    for _mk in ['msg_cuenta_edit', 'msg_cuenta_nueva', 'msg_cuenta_eliminada']:
-        if _mk in st.session_state:
-            st.success(st.session_state.pop(_mk))
+    for _mk in ['msg_cuenta_edit','msg_cuenta_nueva','msg_cuenta_eliminada']:
+        if _mk in st.session_state: st.success(st.session_state.pop(_mk))
 
     # ── Alta de cuenta nueva ───────────────────────────────────────────────────
     with st.expander("➕ Agregar nueva cuenta"):
@@ -623,11 +688,9 @@ with tabs[1]:
         c1, c2, c3, c4, c5 = st.columns(5)
         tipo_new = c3.selectbox("Tipo *", TIPOS_CUENTA, key="new_tipo")
         es_resultado_por_tipo_new = "Resultado" if tipo_es_resultado(tipo_new) else "No Resultado"
-        es_resultado_sel_new = c4.selectbox(
-            "Es Resultado", ["No Resultado", "Resultado"],
-            index=["No Resultado","Resultado"].index(es_resultado_por_tipo_new),
-            key="new_es_resultado"
-        )
+        es_resultado_sel_new = c4.selectbox("Es Resultado", ["No Resultado","Resultado"],
+                                             index=["No Resultado","Resultado"].index(es_resultado_por_tipo_new),
+                                             key="new_es_resultado")
         es_resultado_new = "S" if es_resultado_sel_new == "Resultado" else "N"
         moneda_new = c5.selectbox("Moneda", ["ARS","USD","EUR"], key="new_moneda")
 
@@ -655,8 +718,7 @@ with tabs[1]:
                 if nuevo_sub_new and validar_subrubro_nuevo(conn, rubro_final_new, nuevo_sub_new):
                     st.error(f"❌ El sub-rubro **{nuevo_sub_new}** ya existe en **{rubro_final_new}**.")
                 subrubro_final_new = nuevo_sub_new
-            elif sub_sel_new == "— Sin sub-rubro —":
-                subrubro_final_new = ""
+            elif sub_sel_new == "— Sin sub-rubro —": subrubro_final_new = ""
             else:
                 subrubro_final_new = sub_sel_new
                 analisis_new_list = get_analisis_por_subrubro(conn, sub_sel_new)
@@ -672,10 +734,8 @@ with tabs[1]:
                 if nuevo_an_new and validar_analisis_nuevo(conn, subrubro_final_new, nuevo_an_new):
                     st.error(f"❌ El análisis **{nuevo_an_new}** ya existe en **{subrubro_final_new}**.")
                 analisis_final_new = nuevo_an_new
-            elif an_sel_new == "— Sin análisis —":
-                analisis_final_new = ""
-            else:
-                analisis_final_new = an_sel_new
+            elif an_sel_new == "— Sin análisis —": analisis_final_new = ""
+            else: analisis_final_new = an_sel_new
         elif subrubro_final_new:
             analisis_final_new = st.text_input("Análisis (opcional)", key="new_analisis_libre")
 
@@ -683,10 +743,8 @@ with tabs[1]:
         fases_sel_new = st.selectbox("Fases", opts_fases_new, key="new_fases_sel")
         if fases_sel_new == "✨ + Nueva fase...":
             fases_final_new = st.text_input("Nombre de la fase *", key="new_nueva_fase")
-        elif fases_sel_new == "— Sin fases —":
-            fases_final_new = ""
-        else:
-            fases_final_new = fases_sel_new
+        elif fases_sel_new == "— Sin fases —": fases_final_new = ""
+        else: fases_final_new = fases_sel_new
 
         if st.button("💾 Guardar cuenta", key="btn_nueva_cta", type="primary"):
             errores_new = []
@@ -733,22 +791,21 @@ with tabs[1]:
             | **Tipo** | {cuenta_del['Tipo'] or '—'} |
             | **Extendido** | {cuenta_del['Extendido'] or '—'} |
             """)
-            n_movimientos = cuenta_tiene_movimientos(conn, nro_del)
-            if n_movimientos > 0:
-                st.error(f"❌ La cuenta **{nro_del}** tiene **{n_movimientos} movimiento(s)** en el Libro Diario y no puede eliminarse.")
+            n_mov = cuenta_tiene_movimientos(conn, nro_del)
+            if n_mov > 0:
+                st.error(f"❌ La cuenta **{nro_del}** tiene **{n_mov} movimiento(s)** y no puede eliminarse.")
             else:
-                st.warning(f"⚠️ Esta acción es **irreversible**. La cuenta **{nro_del} — {cuenta_del['Nombre']}** será eliminada permanentemente del plan.")
-                confirmar_del = st.checkbox(f"Confirmo que quiero eliminar la cuenta **{nro_del} — {cuenta_del['Nombre']}**", key=f"confirm_del_{nro_del}")
-                if confirmar_del:
+                st.warning(f"⚠️ Esta acción es **irreversible**. La cuenta **{nro_del} — {cuenta_del['Nombre']}** será eliminada permanentemente.")
+                if st.checkbox(f"Confirmo que quiero eliminar la cuenta **{nro_del} — {cuenta_del['Nombre']}**", key=f"confirm_del_{nro_del}"):
                     if st.button("🗑️ Eliminar cuenta", type="primary", key=f"btn_del_{nro_del}"):
                         try:
                             cur = conn.cursor()
                             cur.execute("DELETE FROM dim_cuenta WHERE nro_cta = %s", (nro_del,))
                             conn.commit(); cur.close()
-                            st.session_state['msg_cuenta_eliminada'] = f"✅ Cuenta **{nro_del} — {cuenta_del['Nombre']}** eliminada del plan de cuentas."
+                            st.session_state['msg_cuenta_eliminada'] = f"✅ Cuenta **{nro_del} — {cuenta_del['Nombre']}** eliminada."
                             st.rerun()
                         except Exception as e:
-                            conn.rollback(); st.error(f"❌ Error al eliminar: {e}")
+                            conn.rollback(); st.error(f"❌ Error: {e}")
 
 # ── Tab 3: Actualizar Plan ─────────────────────────────────────────────────────
 with tabs[2]:
@@ -757,13 +814,21 @@ with tabs[2]:
 
     if 'plan_cargado' in st.session_state:
         r = st.session_state['plan_cargado']
-        st.success(f"✅ Plan actualizado correctamente desde **{r['archivo']}** — {r['nuevas']} cuentas nuevas, {r['actualizadas']} actualizadas, {r['renombradas']} renombradas.")
+        cols_agr = r.get('cols_agregadas', [])
+        msg = (f"✅ Plan actualizado desde **{r['archivo']}** — "
+               f"{r['nuevas']} nuevas, {r['actualizadas']} actualizadas, "
+               f"{r['renombradas']} renombradas, {r['excluidas']} renombres omitidos")
+        if cols_agr:
+            msg += f", {len(cols_agr)} columna(s) nueva(s) agregada(s) a la DB"
+        st.success(msg + ".")
         st.divider()
         c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Cuentas nuevas",       r['nuevas'])
-        c2.metric("Actualizadas",         r['actualizadas'])
-        c3.metric("Renombradas",          r['renombradas'])
-        c4.metric("Total procesadas",     r['nuevas'] + r['actualizadas'])
+        c1.metric("Nuevas",       r['nuevas'])
+        c2.metric("Actualizadas", r['actualizadas'])
+        c3.metric("Renombradas",  r['renombradas'])
+        c4.metric("Total",        r['nuevas'] + r['actualizadas'])
+        if cols_agr:
+            st.info(f"🆕 Columnas agregadas a dim_cuenta: {', '.join(f'{c} ({t})' for c,t in cols_agr)}")
         st.divider()
         if st.button("📥 Cargar otro archivo", type="primary"):
             st.session_state.pop('plan_cargado', None); st.rerun()
@@ -781,7 +846,7 @@ with tabs[2]:
     archivo_plan = st.file_uploader("Archivo del plan de cuentas", type=["xlsx","xls","csv"], key="plan_uploader")
 
     if archivo_plan:
-        df_plan, errores_plan, adv_plan = parsear_plan_cuentas(archivo_plan)
+        df_plan, errores_plan, adv_plan, cols_extra_arch = parsear_plan_cuentas(archivo_plan)
         for adv in adv_plan: st.info(adv)
         if errores_plan:
             for e in errores_plan: st.error(f"❌ {e}")
@@ -801,7 +866,6 @@ with tabs[2]:
         cur.execute("SELECT nro_cta FROM dim_cuenta")
         en_db = {r[0] for r in cur.fetchall()}; cur.close()
         en_archivo = set(df_plan['nro_cta'].tolist())
-
         cuentas_existentes = en_archivo & en_db
         cuentas_nuevas     = en_archivo - en_db
 
@@ -810,34 +874,69 @@ with tabs[2]:
         c1.metric("Cuentas nuevas a agregar",        len(cuentas_nuevas))
         c2.metric("Cuentas existentes a actualizar", len(cuentas_existentes))
 
-        # ── Detección de cambios de nombre ────────────────────────────────────
-        nombres_db = get_nombres_actuales(conn, list(cuentas_existentes))
+        # ── Detección y selección de columnas nuevas ──────────────────────────
+        cols_nuevas_a_agregar = []   # [(col_db, tipo_sql, col_archivo)]
+        cols_excluir_set      = set()
+
+        if cols_extra_arch:
+            cols_db_actuales = get_columnas_dim_cuenta(conn)
+            for col_archivo, col_db in cols_extra_arch.items():
+                if col_db not in cols_db_actuales:
+                    tipo_sql = inferir_tipo_sql(df_plan[col_db])
+                    cols_nuevas_a_agregar.append((col_db, tipo_sql, col_archivo))
+
+            if cols_nuevas_a_agregar:
+                st.divider()
+                st.markdown("#### 🆕 Columnas nuevas detectadas")
+                st.caption("Estas columnas no existen en la DB. Destildá las que no querés agregar.")
+                for col_db, tipo_sql, col_archivo in cols_nuevas_a_agregar:
+                    incluir = st.checkbox(
+                        f"Agregar **{col_archivo}** → `{col_db}` ({tipo_sql})",
+                        value=True, key=f"chk_col_{col_db}"
+                    )
+                    if not incluir:
+                        cols_excluir_set.add(col_db)
+            else:
+                cols_ya_en_db = list(cols_extra_arch.values())
+                if cols_ya_en_db:
+                    st.info(f"ℹ️ Columnas extra del archivo ya existen en la DB: {', '.join(cols_ya_en_db)}")
+
+        # ── Detección y selección de cambios de nombre ────────────────────────
+        nombres_db    = get_nombres_actuales(conn, list(cuentas_existentes))
         df_existentes = df_plan[df_plan['nro_cta'].isin(cuentas_existentes)].copy()
 
-        renombradas = []
+        renombradas_lista = []
         for _, row in df_existentes.iterrows():
             nro = int(row['nro_cta'])
-            nombre_nuevo = row.get('nombre') or ''
+            nombre_nuevo  = row.get('nombre') or ''
             nombre_actual = nombres_db.get(nro) or ''
             if nombre_nuevo.strip().lower() != nombre_actual.strip().lower() and nombre_nuevo.strip():
-                renombradas.append({
-                    'Nro Cta':        nro,
-                    'Nombre actual':  nombre_actual,
-                    'Nombre nuevo':   nombre_nuevo.strip(),
+                renombradas_lista.append({
+                    'nro':           nro,
+                    'Nombre actual': nombre_actual,
+                    'Nombre nuevo':  nombre_nuevo.strip(),
                 })
 
-        if renombradas:
-            st.divider()
-            df_renombradas = pd.DataFrame(renombradas)
-            st.warning(f"✏️ **{len(renombradas)} cuenta(s) con cambio de nombre** — revisá antes de aplicar.")
-            st.dataframe(df_renombradas, use_container_width=True, hide_index=True)
-            confirmar_renombres = st.checkbox(
-                f"✅ Confirmo los {len(renombradas)} cambios de nombre listados arriba.",
-                key="confirmar_renombres"
-            )
-        else:
-            confirmar_renombres = True  # sin cambios de nombre, no bloquea
+        nros_excluir_renombre = set()
 
+        if renombradas_lista:
+            st.divider()
+            st.markdown("#### ✏️ Cambios de nombre detectados")
+            st.caption("Destildá los cambios que no querés aplicar.")
+            for item in renombradas_lista:
+                aplicar = st.checkbox(
+                    f"**{item['nro']}** — ~~{item['Nombre actual']}~~ → **{item['Nombre nuevo']}**",
+                    value=True, key=f"chk_rename_{item['nro']}"
+                )
+                if not aplicar:
+                    nros_excluir_renombre.add(item['nro'])
+
+            n_aplicar = len(renombradas_lista) - len(nros_excluir_renombre)
+            n_omitir  = len(nros_excluir_renombre)
+            if n_omitir:
+                st.info(f"Se aplicarán **{n_aplicar}** renombres y se omitirán **{n_omitir}**.")
+
+        # ── Validación contra Libro Diario ────────────────────────────────────
         st.divider()
         st.markdown("#### 🔍 Validación contra Libro Diario")
         faltantes = get_cuentas_faltantes_diario(conn, en_db | en_archivo)
@@ -854,9 +953,8 @@ with tabs[2]:
                     GROUP BY cuenta_codigo ORDER BY cuenta_codigo
                 """, (faltantes,))
                 rows = cur.fetchall(); cur.close()
-                st.dataframe(
-                    pd.DataFrame(rows, columns=['Nro Cuenta','Movimientos','Primer período','Último período']),
-                    use_container_width=True, hide_index=True)
+                st.dataframe(pd.DataFrame(rows, columns=['Nro Cuenta','Movimientos','Primer período','Último período']),
+                             use_container_width=True, hide_index=True)
             continuar = st.checkbox(
                 "✅ Entiendo que estas cuentas no tendrán clasificación. Continuar de todas formas.",
                 key="plan_continuar_con_faltantes")
@@ -864,24 +962,40 @@ with tabs[2]:
             st.success("✅ Todas las cuentas del Libro Diario están cubiertas por el plan.")
             continuar = True
 
+        # ── Botón aplicar ─────────────────────────────────────────────────────
         st.divider()
-        if continuar and confirmar_renombres:
+        if continuar:
             if st.button("📥 Aplicar actualización del plan", type="primary"):
                 conn2 = get_conn()
                 with st.spinner("Actualizando plan de cuentas..."):
                     try:
-                        n_nuevas, n_act = aplicar_upsert_plan(conn2, df_plan)
+                        # 1. Agregar columnas nuevas seleccionadas
+                        cols_agregadas = []
+                        if cols_nuevas_a_agregar:
+                            cols_para_alter = [
+                                (c, t) for c, t, _ in cols_nuevas_a_agregar
+                                if c not in cols_excluir_set
+                            ]
+                            if cols_para_alter:
+                                cols_agregadas = agregar_columnas_nuevas(conn2, cols_para_alter)
+
+                        # 2. Upsert con exclusiones seleccionadas por el usuario
+                        n_nuevas, n_act = aplicar_upsert_plan(
+                            conn2, df_plan,
+                            nros_excluir_renombre=nros_excluir_renombre,
+                            cols_excluir=cols_excluir_set,
+                        )
                         st.session_state['plan_cargado'] = {
-                            'archivo':    archivo_plan.name,
-                            'nuevas':     n_nuevas,
-                            'actualizadas': n_act,
-                            'renombradas':  len(renombradas),
+                            'archivo':        archivo_plan.name,
+                            'nuevas':         n_nuevas,
+                            'actualizadas':   n_act,
+                            'renombradas':    len(renombradas_lista) - len(nros_excluir_renombre),
+                            'excluidas':      len(nros_excluir_renombre),
+                            'cols_agregadas': cols_agregadas,
                         }
                         st.rerun()
                     except Exception as e:
                         st.error(f"❌ Error al actualizar: {e}")
-        elif not confirmar_renombres:
-            st.info("ℹ️ Confirmá los cambios de nombre para habilitar la actualización.")
 
 # ── Tab 4: Proyectos ───────────────────────────────────────────────────────────
 with tabs[3]:
@@ -901,20 +1015,14 @@ with tabs[3]:
             st.session_state.pop('proyectos_cargados', None); st.rerun()
         st.stop()
 
-    try:
-        df_proy = get_proyectos(conn)
-    except Exception:
-        conn = get_conn(); df_proy = get_proyectos(conn)
+    try: df_proy = get_proyectos(conn)
+    except Exception: conn = get_conn(); df_proy = get_proyectos(conn)
 
     c1, c2, c3 = st.columns(3)
     c1.metric("Total proyectos", len(df_proy))
-    c2.metric("Superficie total m²",
-              f"{df_proy['Superficie'].sum():,.0f}" if not df_proy.empty else "—")
-    c3.metric("Ingresos presup. total",
-              f"${df_proy['Ingresos'].sum():,.0f}" if not df_proy.empty else "—")
-
-    st.dataframe(
-        df_proy, use_container_width=True, hide_index=True,
+    c2.metric("Superficie total m²",    f"{df_proy['Superficie'].sum():,.0f}" if not df_proy.empty else "—")
+    c3.metric("Ingresos presup. total", f"${df_proy['Ingresos'].sum():,.0f}"  if not df_proy.empty else "—")
+    st.dataframe(df_proy, use_container_width=True, hide_index=True,
         column_config={
             "Ingresos":         st.column_config.NumberColumn(format="$ %.0f"),
             "Cto MO Propia":    st.column_config.NumberColumn(format="$ %.0f"),
@@ -924,8 +1032,7 @@ with tabs[3]:
             "Cto Diversos":     st.column_config.NumberColumn(format="$ %.0f"),
             "Avance":           st.column_config.NumberColumn(format="%.0f %%"),
             "Actualizado":      st.column_config.DatetimeColumn(format="DD/MM/YYYY HH:mm"),
-        }
-    )
+        })
 
     st.divider()
     st.markdown("#### 📥 Actualizar desde Excel")
@@ -933,13 +1040,11 @@ with tabs[3]:
     st.code("ccosto | Nombre | fcInicio | fcFin | Ingresos | cto_Mo_Propia | ... | Superficie | Avance | Horas")
 
     archivo_proy = st.file_uploader("Excel de proyectos", type=["xlsx","xls","csv"], key="proy_uploader")
-
     if archivo_proy:
         df_p, errores_p, adv_p = parsear_proyectos(archivo_proy)
         for adv in adv_p: st.info(adv)
         if errores_p:
-            for e in errores_p: st.error(f"❌ {e}")
-            st.stop()
+            for e in errores_p: st.error(f"❌ {e}"); st.stop()
         if df_p.empty:
             st.warning("El archivo no contiene proyectos válidos."); st.stop()
 
@@ -950,9 +1055,8 @@ with tabs[3]:
 
         c1, c2, c3 = st.columns(3)
         c1.metric("Proyectos en archivo", len(df_p))
-        c2.metric("Nuevos",              len(en_arch_p - en_db_p))
-        c3.metric("A actualizar",        len(en_arch_p & en_db_p))
-
+        c2.metric("Nuevos",               len(en_arch_p - en_db_p))
+        c3.metric("A actualizar",         len(en_arch_p & en_db_p))
         st.dataframe(df_p, use_container_width=True, hide_index=True)
         st.divider()
 
@@ -970,10 +1074,8 @@ with tabs[3]:
 # ── Tab 5: Centros de Costo ────────────────────────────────────────────────────
 with tabs[4]:
     st.subheader("Centros de Costo")
-    try:
-        df_cc = get_centros(conn)
-    except Exception:
-        conn = get_conn(); df_cc = get_centros(conn)
+    try: df_cc = get_centros(conn)
+    except Exception: conn = get_conn(); df_cc = get_centros(conn)
     st.metric("Total centros", len(df_cc))
     st.dataframe(df_cc, use_container_width=True, hide_index=True)
 
@@ -996,13 +1098,11 @@ with tabs[4]:
                 try:
                     cur.execute("SELECT 1 FROM dim_centro_costo WHERE codigo = %s", (cod_new.strip(),))
                     if cur.fetchone():
-                        st.error(f"❌ El código **{cod_new.strip()}** ya existe en centros de costo.")
+                        st.error(f"❌ El código **{cod_new.strip()}** ya existe.")
                     else:
                         emp_id_new = EMPRESAS[emp_new] if emp_new != "—" else None
-                        cur.execute("""
-                            INSERT INTO dim_centro_costo (codigo, descripcion, empresa_id)
-                            VALUES (%s,%s,%s)
-                        """, (cod_new.strip(), desc_new.strip(), emp_id_new))
+                        cur.execute("INSERT INTO dim_centro_costo (codigo, descripcion, empresa_id) VALUES (%s,%s,%s)",
+                                    (cod_new.strip(), desc_new.strip(), emp_id_new))
                         conn.commit()
                         st.session_state['msg_centro_nuevo'] = f"✅ Centro de costo **{cod_new.strip()}** agregado correctamente."
                         st.rerun()
@@ -1014,11 +1114,7 @@ with tabs[4]:
 # ── Tab 6: Log Recálculos ──────────────────────────────────────────────────────
 with tabs[5]:
     st.subheader("Log de recálculos del Mayor")
-    try:
-        df_log = get_log(conn)
-    except Exception:
-        conn = get_conn(); df_log = get_log(conn)
-    if df_log.empty:
-        st.info("No hay recálculos registrados.")
-    else:
-        st.dataframe(df_log, use_container_width=True, hide_index=True)
+    try: df_log = get_log(conn)
+    except Exception: conn = get_conn(); df_log = get_log(conn)
+    if df_log.empty: st.info("No hay recálculos registrados.")
+    else: st.dataframe(df_log, use_container_width=True, hide_index=True)
