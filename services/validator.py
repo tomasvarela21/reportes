@@ -4,9 +4,9 @@ validator.py
 Validación de DataFrames del Libro Diario contra la base de datos.
 
 Validaciones implementadas:
-  - Cuentas existentes en dim_cuenta              → bloqueante
+  - Cuentas existentes en dim_cuenta               → bloqueante
   - Centros de costo existentes en dim_centro_costo → bloqueante
-  - Descuadre contable por asiento                → bloqueante
+  - Descuadre contable por asiento                 → bloqueante
 """
 
 import logging
@@ -109,22 +109,37 @@ class Validator:
         if df_valid.empty:
             return errores
 
+        # ── FIX: agrupar por fecha + tipo + nro para no mezclar asientos
+        # de distintos períodos que casualmente comparten el mismo nro_asiento
+        claves = ['fecha', 'tipo_asiento', 'nro_asiento']
+        claves_presentes = [c for c in claves if c in df_valid.columns]
+
         balance = (
             df_valid
-            .groupby('nro_asiento')
+            .groupby(claves_presentes)
             .apply(lambda g: round(g['debe'].sum() + g['haber'].sum(), 2))
+            .reset_index(name='diferencia')
         )
-        descuadres = balance[balance.abs() > TOLERANCIA_DESCUADRE]
+        descuadres = balance[balance['diferencia'].abs() > TOLERANCIA_DESCUADRE]
 
         if descuadres.empty:
             return errores
 
         asientos_detalle = []
-        for nro_asiento, diff in descuadres.items():
-            filas_asiento = df_valid[df_valid['nro_asiento'] == nro_asiento]
-            primera       = filas_asiento.iloc[0]
-            fecha         = self._fmt_fecha(primera.get('fecha'))
-            tipo          = primera.get('tipo_asiento', '—') or '—'
+        for _, desc_row in descuadres.iterrows():
+            # Reconstruir filtro dinámico con las claves disponibles
+            mask = pd.Series([True] * len(df_valid), index=df_valid.index)
+            for clave in claves_presentes:
+                mask &= (df_valid[clave] == desc_row[clave])
+            filas_asiento = df_valid[mask]
+
+            fecha  = self._fmt_fecha(desc_row.get('fecha', '—'))
+            tipo   = str(desc_row.get('tipo_asiento', '—')) if 'tipo_asiento' in desc_row else '—'
+            nro    = desc_row.get('nro_asiento', '—')
+            diff   = desc_row['diferencia']
+
+            total_debe  = round(filas_asiento['debe'].sum(),  2)
+            total_haber = round(filas_asiento['haber'].sum(), 2)
 
             renglones = []
             for _, row in filas_asiento.iterrows():
@@ -136,19 +151,25 @@ class Validator:
                 })
 
             asientos_detalle.append({
-                'nro_asiento': nro_asiento,
-                'tipo':        tipo,
-                'fecha':       fecha,
-                'diff':        diff,
-                'renglones':   renglones,
+                'nro_asiento':  nro,
+                'tipo':         tipo,
+                'fecha':        fecha,
+                'diff':         diff,
+                'total_debe':   total_debe,
+                'total_haber':  total_haber,
+                'renglones':    renglones,
             })
+
+            log.error(
+                f"Descuadre — fecha={fecha} | tipo={tipo} | nro={nro} | "
+                f"debe={total_debe:+,.2f} | haber={total_haber:+,.2f} | dif={diff:+,.2f}"
+            )
 
         errores.append({
             '__tipo__':  'descuadre',
             'resumen':   f"{len(descuadres)} asiento(s) descuadrado(s)",
             'asientos':  asientos_detalle,
         })
-        log.error(f"Descuadres: {list(descuadres.index)}")
         return errores
 
     def _validar_centros_costo(self, df: pd.DataFrame) -> list:
