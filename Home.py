@@ -38,3 +38,34 @@ for col, (icon, titulo, bg, border, color, desc) in zip(cols, cards):
 
 st.divider()
 st.markdown("#### 👈 Seleccioná una sección desde el menú lateral para comenzar.")
+
+# ── Power BI Refresh ───────────────────────────────────────────────────────────
+import os
+from dotenv import load_dotenv
+load_dotenv()
+
+pbi_configurado = all([
+    os.getenv("POWERBI_TENANT_ID"),
+    os.getenv("POWERBI_CLIENT_ID"),
+    os.getenv("POWERBI_CLIENT_SECRET"),
+    os.getenv("POWERBI_USERNAME"),
+    os.getenv("POWERBI_PASSWORD"),
+    os.getenv("POWERBI_DATASET_ID"),
+])
+
+if pbi_configurado:
+    st.divider()
+    c1, c2, c3 = st.columns([1, 2, 1])
+    with c2:
+        st.markdown("#### 🔄 Power BI")
+        st.caption("Actualizá el dataset de Power BI Service con los últimos datos cargados.")
+        if st.button("🔄 Actualizar dataset en Power BI", type="secondary", use_container_width=True):
+            import sys
+            sys.path.append(os.path.join(os.path.dirname(__file__), 'services'))
+            from powerbi_refresh import trigger_refresh
+            with st.spinner("Conectando con Power BI Service..."):
+                resultado = trigger_refresh()
+            if resultado["ok"]:
+                st.success("✅ Refresh iniciado. El dataset se actualizará en los próximos minutos.")
+            else:
+                st.error(f"❌ {resultado['error']}")
