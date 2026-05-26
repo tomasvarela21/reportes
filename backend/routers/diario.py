@@ -1,7 +1,14 @@
-from fastapi import APIRouter, Depends, Form, UploadFile, File
+from fastapi import APIRouter, Depends, Form, Query, UploadFile, File
 
+from backend.core.pagination import PaginationParams
+from backend.core.responses import PaginatedResponse
 from backend.database import get_conn
-from backend.schemas.diario import ValidateResponse, UploadResponse, PeriodoResumen
+from backend.schemas.diario import (
+    DiarioRow,
+    PeriodoResumen,
+    UploadResponse,
+    ValidateResponse,
+)
 from backend.services import diario_service
 from backend.services.file_parser import EMPRESAS
 
@@ -10,10 +17,12 @@ router = APIRouter(prefix="/diario")
 _EMPRESAS_VALIDAS = list(EMPRESAS.keys())
 
 
+# ── Upload / Validate ─────────────────────────────────────────────────────────
+
 @router.post("/validate", response_model=ValidateResponse)
 async def validate_diario(
     file: UploadFile = File(..., description="CSV del libro diario"),
-    empresa_nombre: str = Form(..., description=f"Nombre de empresa: {list(EMPRESAS.keys())}"),
+    empresa_nombre: str = Form(..., description=f"Nombre de empresa: {_EMPRESAS_VALIDAS}"),
     conn=Depends(get_conn),
 ):
     """
@@ -21,17 +30,21 @@ async def validate_diario(
     Devuelve errores, advertencias y estado de cada período detectado.
     """
     contenido = await file.read()
-    return diario_service.validate_csv(conn, contenido, file.filename or "diario.csv", empresa_nombre)
+    return diario_service.validate_csv(
+        conn, contenido, file.filename or "diario.csv", empresa_nombre
+    )
 
 
 @router.post("/upload", response_model=UploadResponse)
 async def upload_diario(
     file: UploadFile = File(..., description="CSV del libro diario"),
-    empresa_nombre: str = Form(..., description=f"Nombre de empresa: {list(EMPRESAS.keys())}"),
+    empresa_nombre: str = Form(..., description=f"Nombre de empresa: {_EMPRESAS_VALIDAS}"),
     periodos_json: str = Form(
         ...,
-        description='JSON con decisión por período. Ej: {"2024/01": true, "2024/02": false}. '
-                    'true = reemplazar si ya existe.',
+        description=(
+            'JSON con decisión por período. Ej: {"2024/01": true, "2024/02": false}. '
+            "true = reemplazar si ya existe."
+        ),
     ),
     conn=Depends(get_conn),
 ):
@@ -45,7 +58,44 @@ async def upload_diario(
     )
 
 
+# ── Consultas ─────────────────────────────────────────────────────────────────
+
 @router.get("/periodos/{empresa_id}", response_model=list[PeriodoResumen])
 def periodos_empresa(empresa_id: int, conn=Depends(get_conn)):
-    """Devuelve todos los períodos cargados en libro_diario para la empresa indicada."""
+    """Períodos cargados en libro_diario para la empresa, con totales por período."""
     return diario_service.listar_periodos(conn, empresa_id)
+
+
+@router.get("/{empresa_id}", response_model=PaginatedResponse[DiarioRow])
+def consultar_diario(
+    empresa_id: int,
+    anio: int | None           = Query(None, description="Filtrar por año"),
+    mes: int | None            = Query(None, description="Filtrar por mes"),
+    cuenta_codigo: int | None  = Query(None, description="Filtrar por número de cuenta"),
+    centro_costo: str | None   = Query(None, description="Filtrar por centro de costo"),
+    descripcion: str | None    = Query(None, description="Búsqueda parcial en descripción (ILIKE)"),
+    pagination: PaginationParams = Depends(PaginationParams),
+    conn=Depends(get_conn),
+):
+    """
+    Consulta el libro_diario con filtros opcionales.
+
+    Retorna una respuesta paginada (PaginatedResponse) con filas enriquecidas
+    del libro_diario (JOIN dim_cuenta para nombre y rubro de la cuenta).
+    """
+    filtros = {
+        "anio":          anio,
+        "mes":           mes,
+        "cuenta_codigo": cuenta_codigo,
+        "centro_costo":  centro_costo,
+        "descripcion":   descripcion,
+        "limit":         pagination.limit,
+        "offset":        pagination.offset,
+    }
+    filas, total = diario_service.consultar_diario(conn, empresa_id, filtros)
+    return PaginatedResponse.build(
+        data=filas,
+        total=total,
+        limit=pagination.limit,
+        offset=pagination.offset,
+    )

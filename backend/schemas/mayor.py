@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, datetime
 from pydantic import BaseModel
 
 
@@ -31,3 +31,24 @@ class MayorResumenRow(BaseModel):
     total_debe: float
     total_haber: float
     saldo_acumulado: float
+
+
+class MayorPeriodo(BaseModel):
+    """Período disponible en libro_mayor para una empresa."""
+
+    periodo_anio: int
+    periodo_mes: int
+
+
+class RecalculoLog(BaseModel):
+    """Entrada del log de recálculos del libro_mayor."""
+
+    empresa_nombre: str | None = None
+    desde_anio: int
+    desde_mes: int
+    hasta_anio: int
+    hasta_mes: int
+    motivo: str | None = None
+    registros_afectados: int | None = None
+    duracion_ms: int | None = None
+    ejecutado_en: datetime | None = None

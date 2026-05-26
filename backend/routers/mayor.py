@@ -1,12 +1,52 @@
 from fastapi import APIRouter, Depends, Query
-from psycopg2.extras import RealDictCursor
 
 from backend.database import get_conn
-from backend.schemas.mayor import MayorRow, MayorResumenRow
+from backend.repositories import mayor_repository
+from backend.schemas.mayor import MayorPeriodo, MayorResumenRow, MayorRow, RecalculoLog
 
 router = APIRouter(prefix="/mayor")
 
 _NIVEL_DESC = "'cuenta' | 'subcuenta' | 'centro_costo'"
+
+
+# ── Rutas estáticas (van antes de /{empresa_id} para evitar ambigüedad) ───────
+
+@router.get("/recalculos", response_model=list[RecalculoLog])
+def listar_recalculos(
+    limit: int = Query(100, ge=1, le=500, description="Máximo de entradas a devolver"),
+    conn=Depends(get_conn),
+):
+    """
+    Devuelve el historial de recálculos del libro_mayor (mayor_recalculo_log),
+    con el nombre de empresa, ordenados por fecha descendente.
+    """
+    return mayor_repository.find_recalculos(conn, limit=limit)
+
+
+# ── Rutas dinámicas por empresa_id ────────────────────────────────────────────
+
+@router.get("/{empresa_id}/periodos", response_model=list[MayorPeriodo])
+def periodos_mayor(empresa_id: int, conn=Depends(get_conn)):
+    """
+    Devuelve los períodos distintos disponibles en libro_mayor para la empresa.
+    Útil para poblar selectores de período en frontends.
+    """
+    return mayor_repository.find_periodos(conn, empresa_id)
+
+
+@router.get("/{empresa_id}/resumen", response_model=list[MayorResumenRow])
+def resumen_mayor(
+    empresa_id: int,
+    anio: int | None = Query(None, description="Filtrar por año"),
+    mes: int | None  = Query(None, description="Filtrar por mes"),
+    conn=Depends(get_conn),
+):
+    """
+    Totales por cuenta (nivel='cuenta') con nombre y rubro de dim_cuenta.
+    Si no se filtra por período, suma todos los períodos disponibles.
+    """
+    filtros = {"anio": anio, "mes": mes}
+    return mayor_repository.find_resumen(conn, empresa_id, filtros)
 
 
 @router.get("/{empresa_id}", response_model=list[MayorRow])
@@ -22,82 +62,13 @@ def listar_mayor(
     conn=Depends(get_conn),
 ):
     """Devuelve filas del libro_mayor para una empresa, con filtros opcionales."""
-    conditions = ["empresa_id = %s"]
-    params: list = [empresa_id]
-
-    if anio is not None:
-        conditions.append("periodo_anio = %s")
-        params.append(anio)
-    if mes is not None:
-        conditions.append("periodo_mes = %s")
-        params.append(mes)
-    if nivel is not None:
-        conditions.append("nivel = %s")
-        params.append(nivel)
-    if cuenta_codigo is not None:
-        conditions.append("cuenta_codigo = %s")
-        params.append(cuenta_codigo)
-    if centro_costo is not None:
-        conditions.append("centro_costo = %s")
-        params.append(centro_costo)
-
-    where = " AND ".join(conditions)
-    params.extend([limit, offset])
-
-    with conn.cursor(cursor_factory=RealDictCursor) as cur:
-        cur.execute(f"""
-            SELECT
-                id,
-                periodo_anio, periodo_mes, fecha_periodo,
-                nivel,
-                cuenta_codigo, tipo_subcuenta, nro_subcuenta, centro_costo,
-                total_debe, total_haber,
-                saldo_anterior, saldo_periodo, saldo_acumulado
-            FROM libro_mayor
-            WHERE {where}
-            ORDER BY periodo_anio, periodo_mes, cuenta_codigo, nivel
-            LIMIT %s OFFSET %s
-        """, params)
-        return cur.fetchall()
-
-
-@router.get("/{empresa_id}/resumen", response_model=list[MayorResumenRow])
-def resumen_mayor(
-    empresa_id: int,
-    anio: int | None = Query(None, description="Filtrar por año"),
-    mes: int | None  = Query(None, description="Filtrar por mes"),
-    conn=Depends(get_conn),
-):
-    """
-    Totales por cuenta (nivel='cuenta') con nombre y rubro de dim_cuenta.
-    Si no se filtra por período, suma todos los períodos disponibles.
-    """
-    conditions = ["lm.empresa_id = %s", "lm.nivel = 'cuenta'"]
-    params: list = [empresa_id]
-
-    if anio is not None:
-        conditions.append("lm.periodo_anio = %s")
-        params.append(anio)
-    if mes is not None:
-        conditions.append("lm.periodo_mes = %s")
-        params.append(mes)
-
-    where = " AND ".join(conditions)
-
-    with conn.cursor(cursor_factory=RealDictCursor) as cur:
-        cur.execute(f"""
-            SELECT
-                lm.cuenta_codigo,
-                dc.nombre,
-                dc.rubro,
-                dc.tipo,
-                SUM(lm.total_debe)      AS total_debe,
-                SUM(lm.total_haber)     AS total_haber,
-                SUM(lm.saldo_acumulado) AS saldo_acumulado
-            FROM libro_mayor lm
-            LEFT JOIN dim_cuenta dc ON dc.nro_cta = lm.cuenta_codigo
-            WHERE {where}
-            GROUP BY lm.cuenta_codigo, dc.nombre, dc.rubro, dc.tipo
-            ORDER BY lm.cuenta_codigo
-        """, params)
-        return cur.fetchall()
+    filtros = {
+        "anio":          anio,
+        "mes":           mes,
+        "nivel":         nivel,
+        "cuenta_codigo": cuenta_codigo,
+        "centro_costo":  centro_costo,
+        "limit":         limit,
+        "offset":        offset,
+    }
+    return mayor_repository.find_by_empresa(conn, empresa_id, filtros)

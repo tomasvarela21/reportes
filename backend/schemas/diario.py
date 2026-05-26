@@ -1,3 +1,4 @@
+from datetime import date
 from pydantic import BaseModel
 
 
@@ -43,4 +44,27 @@ class PeriodoResumen(BaseModel):
     total_debe: float
     total_haber: float
     ultima_carga: str | None = None
+    archivo_origen: str | None = None
+
+
+class DiarioRow(BaseModel):
+    """Fila del libro_diario con datos enriquecidos de dim_cuenta (JOIN)."""
+
+    id: int
+    empresa_id: int
+    fecha: date | None = None
+    periodo_anio: int
+    periodo_mes: int
+    tipo_asiento: str | None = None
+    nro_asiento: str | None = None
+    nro_renglon: str | None = None
+    cuenta_codigo: int
+    cuenta_nombre: str | None = None   # dc.nombre  (JOIN dim_cuenta)
+    cuenta_rubro: str | None = None    # dc.rubro   (JOIN dim_cuenta)
+    tipo_subcuenta: str | None = None
+    nro_subcuenta: str | None = None
+    centro_costo: str | None = None
+    debe: float
+    haber: float
+    descripcion: str | None = None
     archivo_origen: str | None = None

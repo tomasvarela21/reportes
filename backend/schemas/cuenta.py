@@ -57,3 +57,20 @@ class CuentaFiltros(BaseModel):
     tipo: TipoCuenta | None = None
     activa: bool | None = None
     search: str | None = None
+
+
+class MovimientosResponse(BaseModel):
+    """Respuesta del endpoint GET /cuentas/{nro_cta}/movimientos."""
+
+    nro_cta: int
+    movimientos: int
+
+
+class UploadCuentasResponse(BaseModel):
+    """Respuesta del endpoint POST /cuentas/upload."""
+
+    nuevas: int
+    actualizadas: int
+    renombradas: int
+    cols_agregadas: list[str]
+    archivo: str
