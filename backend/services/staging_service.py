@@ -11,7 +11,7 @@ from typing import Optional, List
 import pandas as pd
 import psycopg2.extras
 
-from backend.services.mayor_calculator import MayorCalculator
+from .mayor_calculator import MayorCalculator
 
 log = logging.getLogger(__name__)
 

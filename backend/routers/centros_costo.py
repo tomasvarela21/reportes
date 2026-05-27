@@ -1,8 +1,8 @@
 from fastapi import APIRouter, Depends
 
-from backend.database import get_conn
-from backend.schemas.centro_costo import CentroCostoCreate, CentroCostoResponse
-from backend.services import centro_costo_service
+from ..database import get_conn
+from ..schemas.centro_costo import CentroCostoCreate, CentroCostoResponse
+from ..services import centro_costo_service
 
 router = APIRouter(prefix="/centros-costo")
 

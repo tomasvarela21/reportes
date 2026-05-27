@@ -6,14 +6,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.security.api_key import APIKeyHeader
 
-from backend.config import settings
-from backend.core.exceptions import (
+from .config import settings
+from .core.exceptions import (
     BusinessValidationError,
     ConflictError,
     DatabaseError,
     NotFoundError,
 )
-from backend.routers import (
+from .routers import (
     apertura,
     centros_costo,
     consistencia,

@@ -7,7 +7,7 @@ import logging
 import psycopg2.extras
 from psycopg2.extras import RealDictCursor
 
-from backend.core.db_utils import get_columnas_tabla, execute_batch
+from ..core.db_utils import get_columnas_tabla, execute_batch
 
 log = logging.getLogger(__name__)
 

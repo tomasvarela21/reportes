@@ -1,9 +1,9 @@
 from fastapi import APIRouter, Depends
 from fastapi.responses import JSONResponse
 
-from backend.database import get_conn
-from backend.schemas.powerbi import RefreshResponse
-from backend.services import powerbi_service
+from ..database import get_conn
+from ..schemas.powerbi import RefreshResponse
+from ..services import powerbi_service
 
 router = APIRouter(prefix="/powerbi")
 

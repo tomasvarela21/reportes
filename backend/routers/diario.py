@@ -1,16 +1,16 @@
 from fastapi import APIRouter, Depends, Form, Query, UploadFile, File
 
-from backend.core.pagination import PaginationParams
-from backend.core.responses import PaginatedResponse
-from backend.database import get_conn
-from backend.schemas.diario import (
+from ..core.pagination import PaginationParams
+from ..core.responses import PaginatedResponse
+from ..database import get_conn
+from ..schemas.diario import (
     DiarioRow,
     PeriodoResumen,
     UploadResponse,
     ValidateResponse,
 )
-from backend.services import diario_service
-from backend.services.file_parser import EMPRESAS
+from ..services import diario_service
+from ..services.file_parser import EMPRESAS
 
 router = APIRouter(prefix="/diario")
 

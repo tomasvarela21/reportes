@@ -1,10 +1,10 @@
 from fastapi import APIRouter, Depends, File, Form, Query, UploadFile
 
-from backend.core.pagination import PaginationParams
-from backend.core.responses import PaginatedResponse
-from backend.database import get_conn
-from backend.schemas.apertura import AperturaRow, AperturaStats, UploadAperturaResponse
-from backend.services import apertura_service
+from ..core.pagination import PaginationParams
+from ..core.responses import PaginatedResponse
+from ..database import get_conn
+from ..schemas.apertura import AperturaRow, AperturaStats, UploadAperturaResponse
+from ..services import apertura_service
 
 router = APIRouter(prefix="/apertura")
 

@@ -7,7 +7,7 @@ import logging
 
 import requests
 
-from backend.config import settings
+from ..config import settings
 
 log = logging.getLogger(__name__)
 

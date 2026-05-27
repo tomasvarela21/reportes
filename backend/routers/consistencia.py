@@ -1,13 +1,13 @@
 from fastapi import APIRouter, Depends, File, UploadFile
 
-from backend.core.responses import MessageResponse
-from backend.database import get_conn
-from backend.schemas.consistencia import (
+from ..core.responses import MessageResponse
+from ..database import get_conn
+from ..schemas.consistencia import (
     CompararResponse,
     EstadoResponse,
     UploadConsistenciaResponse,
 )
-from backend.services import consistencia_service
+from ..services import consistencia_service
 
 router = APIRouter(prefix="/consistencia")
 

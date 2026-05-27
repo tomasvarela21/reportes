@@ -1,11 +1,11 @@
 from fastapi import APIRouter, Depends, Query, UploadFile, File
 
-from backend.database import get_conn
-from backend.schemas.proyecto import (
+from ..database import get_conn
+from ..schemas.proyecto import (
     ProyectoResponse, PresupuestoResponse,
     UploadProyectosResponse, UploadPresupuestosResponse,
 )
-from backend.services import proyecto_service
+from ..services import proyecto_service
 
 router = APIRouter()
 

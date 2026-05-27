@@ -2,7 +2,7 @@ import logging
 import psycopg2
 from psycopg2.extras import RealDictCursor
 from fastapi import HTTPException
-from backend.config import settings
+from .config import settings
 
 log = logging.getLogger(__name__)
 

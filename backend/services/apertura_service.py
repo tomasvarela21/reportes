@@ -9,9 +9,9 @@ from datetime import datetime
 
 import pandas as pd
 
-from backend.core.exceptions import BusinessValidationError, DatabaseError, NotFoundError
-from backend.repositories import apertura_repository
-from backend.services.mayor_calculator import MayorCalculator
+from ..core.exceptions import BusinessValidationError, DatabaseError, NotFoundError
+from ..repositories import apertura_repository
+from .mayor_calculator import MayorCalculator
 
 log = logging.getLogger(__name__)
 
@@ -67,7 +67,7 @@ def upload_apertura(
         empresa_id_param = EMPRESAS[clave]
 
     # ── Parsear el CSV ────────────────────────────────────────────────────────
-    from backend.core.file_utils import parse_bytes_to_df
+    from ..core.file_utils import parse_bytes_to_df
     df_raw, _fmt = parse_bytes_to_df(contenido, nombre_archivo)
 
     df, errores, advertencias = _parsear_csv_apertura(df_raw, empresa_id_param)
