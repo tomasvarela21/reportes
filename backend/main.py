@@ -13,7 +13,17 @@ from backend.core.exceptions import (
     DatabaseError,
     NotFoundError,
 )
-from backend.routers import centros_costo, cuentas, diario, empresas, mayor, proyectos
+from backend.routers import (
+    apertura,
+    centros_costo,
+    consistencia,
+    cuentas,
+    diario,
+    empresas,
+    mayor,
+    powerbi,
+    proyectos,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -66,6 +76,9 @@ app.include_router(centros_costo.router, tags=["centros-costo"], **_ROUTER_KWARG
 app.include_router(proyectos.router,     tags=["proyectos"],     **_ROUTER_KWARGS)
 app.include_router(diario.router,        tags=["diario"],        **_ROUTER_KWARGS)
 app.include_router(mayor.router,         tags=["mayor"],         **_ROUTER_KWARGS)
+app.include_router(apertura.router,      tags=["apertura"],      **_ROUTER_KWARGS)
+app.include_router(consistencia.router,  tags=["consistencia"],  **_ROUTER_KWARGS)
+app.include_router(powerbi.router,       tags=["powerbi"],       **_ROUTER_KWARGS)
 
 
 # ── Exception handlers de dominio ─────────────────────────────────────────────
