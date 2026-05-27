@@ -10,9 +10,9 @@ import logging
 from fastapi import HTTPException
 
 from repositories import diario_repository
-from file_parser import FileParser, EMPRESAS
-from validator import Validator
-from staging_service import StagingService
+from services.file_parser import FileParser, EMPRESAS
+from services.validator import Validator
+from services.staging_service import StagingService
 from schemas.diario import ValidateResponse, UploadResponse, PeriodoInfo, PeriodoResumen
 
 log = logging.getLogger(__name__)

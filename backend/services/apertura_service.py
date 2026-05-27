@@ -11,7 +11,7 @@ import pandas as pd
 
 from core.exceptions import BusinessValidationError, DatabaseError, NotFoundError
 from repositories import apertura_repository
-from mayor_calculator import MayorCalculator
+from services.mayor_calculator import MayorCalculator
 
 log = logging.getLogger(__name__)
 
