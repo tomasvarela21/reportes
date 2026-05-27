@@ -11,15 +11,15 @@ import re
 import pandas as pd
 import psycopg2
 
-from ..core.db_utils import get_columnas_tabla
-from ..core.exceptions import (
+from core.db_utils import get_columnas_tabla
+from core.exceptions import (
     BusinessValidationError,
     ConflictError,
     DatabaseError,
     NotFoundError,
 )
-from ..repositories import cuenta_repository
-from ..schemas.cuenta import CuentaCreate, CuentaUpdate
+from repositories import cuenta_repository
+from schemas.cuenta import CuentaCreate, CuentaUpdate
 
 log = logging.getLogger(__name__)
 
@@ -132,7 +132,7 @@ def upsert_plan_desde_archivo(
 
     Retorna dict con: nuevas, actualizadas, renombradas, cols_agregadas, archivo.
     """
-    from ..core.file_utils import parse_bytes_to_df
+    from core.file_utils import parse_bytes_to_df
 
     df, _fmt = parse_bytes_to_df(contenido, nombre_archivo)
     df, cols_extra_map = _parsear_df_plan(df, nombre_archivo)

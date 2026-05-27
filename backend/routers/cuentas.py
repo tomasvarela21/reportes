@@ -1,14 +1,14 @@
 from fastapi import APIRouter, Depends, Query, UploadFile, File
 
-from ..database import get_conn
-from ..schemas.cuenta import (
+from database import get_conn
+from schemas.cuenta import (
     CuentaCreate,
     CuentaResponse,
     CuentaUpdate,
     MovimientosResponse,
     UploadCuentasResponse,
 )
-from ..services import cuenta_service
+from services import cuenta_service
 
 router = APIRouter(prefix="/cuentas")
 

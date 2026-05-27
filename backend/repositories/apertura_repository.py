@@ -7,7 +7,7 @@ from datetime import datetime
 
 from psycopg2.extras import RealDictCursor
 
-from ..core.db_utils import execute_batch
+from core.db_utils import execute_batch
 
 log = logging.getLogger(__name__)
 

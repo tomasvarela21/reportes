@@ -1,8 +1,8 @@
 from fastapi import APIRouter, Depends, HTTPException
 from psycopg2.extras import RealDictCursor
 
-from ..database import get_conn
-from ..schemas.empresa import EmpresaCreate, EmpresaResponse, EmpresaUpdate
+from database import get_conn
+from schemas.empresa import EmpresaCreate, EmpresaResponse, EmpresaUpdate
 
 router = APIRouter(prefix="/empresas")
 

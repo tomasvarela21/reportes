@@ -1,3 +1,7 @@
+import sys
+import os
+sys.path.insert(0, os.path.dirname(__file__))
+
 import logging
 import traceback
 
@@ -6,14 +10,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.security.api_key import APIKeyHeader
 
-from .config import settings
-from .core.exceptions import (
+from config import settings
+from core.exceptions import (
     BusinessValidationError,
     ConflictError,
     DatabaseError,
     NotFoundError,
 )
-from .routers import (
+from routers import (
     apertura,
     centros_costo,
     consistencia,

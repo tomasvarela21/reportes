@@ -5,9 +5,9 @@ Lanza excepciones de core/exceptions.py (no HTTPException).
 """
 import logging
 
-from ..core.exceptions import ConflictError, DatabaseError
-from ..repositories import centro_costo_repository
-from ..schemas.centro_costo import CentroCostoCreate
+from core.exceptions import ConflictError, DatabaseError
+from repositories import centro_costo_repository
+from schemas.centro_costo import CentroCostoCreate
 
 log = logging.getLogger(__name__)
 

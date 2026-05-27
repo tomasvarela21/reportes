@@ -10,8 +10,8 @@ from datetime import date
 
 import pandas as pd
 
-from ..core.exceptions import BusinessValidationError, DatabaseError
-from ..repositories import consistencia_repository
+from core.exceptions import BusinessValidationError, DatabaseError
+from repositories import consistencia_repository
 
 log = logging.getLogger(__name__)
 

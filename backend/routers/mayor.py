@@ -1,8 +1,8 @@
 from fastapi import APIRouter, Depends, Query
 
-from ..database import get_conn
-from ..repositories import mayor_repository
-from ..schemas.mayor import MayorPeriodo, MayorResumenRow, MayorRow, RecalculoLog
+from database import get_conn
+from repositories import mayor_repository
+from schemas.mayor import MayorPeriodo, MayorResumenRow, MayorRow, RecalculoLog
 
 router = APIRouter(prefix="/mayor")
 

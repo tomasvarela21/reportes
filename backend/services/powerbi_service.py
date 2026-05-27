@@ -7,7 +7,7 @@ import logging
 
 import requests
 
-from ..config import settings
+from config import settings
 
 log = logging.getLogger(__name__)
 
