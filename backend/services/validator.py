@@ -25,9 +25,9 @@ class Validator:
         self._cuentas_validas = self._cargar_cuentas()
         self._centros_validos = self._cargar_centros()
 
-        errores += self._validar_cuentas(df)
-        errores += self._validar_descuadres(df)
-        errores += self._validar_centros_costo(df)
+        errores      += self._validar_cuentas(df)
+        errores      += self._validar_descuadres(df)
+        advertencias += self._validar_centros_costo(df)  # centros no bloquean la carga
 
         return errores, advertencias
 
@@ -60,7 +60,8 @@ class Validator:
         if not cuentas_invalidas:
             return errores
 
-        lineas = [f"{len(cuentas_invalidas)} cuenta(s) no existen en el plan de cuentas:"]
+        lista_str = str(list(cuentas_invalidas))  # formato [1234, 5678] que el frontend parsea
+        lineas = [f"{len(cuentas_invalidas)} cuenta(s) no existen en el plan de cuentas: {lista_str}"]
         for cuenta in cuentas_invalidas:
             filas = df[df['cuenta_codigo'] == cuenta]
             primera = filas.iloc[0]
@@ -115,10 +116,10 @@ class Validator:
 
             renglones = [
                 {
-                    'renglon': row.get('nro_renglon', '—'),
-                    'cuenta':  int(row['cuenta_codigo']) if pd.notna(row.get('cuenta_codigo')) else '—',
-                    'debe':    float(row.get('debe', 0)),
-                    'haber':   float(row.get('haber', 0)),
+                    'Renglón': row.get('nro_renglon', '—'),
+                    'Cuenta':  int(row['cuenta_codigo']) if pd.notna(row.get('cuenta_codigo')) else '—',
+                    'Debe':    float(row.get('debe', 0)),
+                    'Haber':   float(row.get('haber', 0)),
                 }
                 for _, row in filas_asiento.iterrows()
             ]
@@ -157,17 +158,8 @@ class Validator:
         if not centros_invalidos:
             return errores
 
-        lineas = [f"{len(centros_invalidos)} centro(s) de costo no registrados en el maestro:"]
-        for centro in centros_invalidos:
-            filas = df[df['centro_costo'].astype(str).str.strip() == str(centro)]
-            primera = filas.iloc[0]
-            fecha   = self._fmt_fecha(primera.get('fecha'))
-            asiento = primera.get('nro_asiento', '—')
-            tipo    = primera.get('tipo_asiento', '—') or '—'
-            n       = len(filas)
-            lineas.append(
-                f"  tipo={tipo} | nro={asiento} | fecasi={fecha} | "
-                f"ccosto='{centro}' | aparece en {n} fila(s)"
-            )
-        errores.append("\n".join(lineas))
+        lista_str = str([str(c) for c in centros_invalidos])
+        errores.append(
+            f"{len(centros_invalidos)} centro(s) de costo no registrados: {lista_str}"
+        )
         return errores

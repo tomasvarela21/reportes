@@ -55,8 +55,8 @@ class StagingService:
                     COUNT(*),
                     COALESCE(SUM(debe), 0),
                     COALESCE(SUM(haber), 0),
-                    MIN(cargado_en),
-                    MIN(archivo_origen)
+                    MAX(cargado_en),
+                    MAX(archivo_origen)
                 FROM libro_diario
                 WHERE empresa_id = %s AND periodo_anio = %s AND periodo_mes = %s
             """, (empresa_id, anio, mes))

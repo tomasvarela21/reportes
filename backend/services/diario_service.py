@@ -64,8 +64,11 @@ def validate_csv(conn, contenido: bytes, nombre_archivo: str, empresa_nombre: st
         result.advertencias += advertencias_val
         result.ok = len(result.errores) == 0
 
+    # Calcular períodos del archivo siempre que el dataframe exista,
+    # incluso cuando ok=False por errores de validación (cuentas inválidas, etc.).
+    # El dataframe es None solo cuando el archivo no pudo parsearse en absoluto.
     periodos_info = []
-    if result.ok and result.dataframe is not None:
+    if result.dataframe is not None:
         svc = StagingService(conn)
         for pi in svc.verificar_periodos_df(result.dataframe, result.empresa_id):
             periodos_info.append(PeriodoInfo(
