@@ -1,6 +1,6 @@
 """
-sync_proyectos.py
-==================
+services/proyecto_sync_service.py
+==================================
 Sincroniza las tablas 'proyectos' y 'proy_presupuestos' desde la base de datos
 externa (sistema de gestión) hacia la base de datos de ReporteApp (Neon).
 
@@ -14,14 +14,12 @@ Lógica:
     5. Registra el resultado en sync_proyectos_log.
 
 Uso:
-    python sync_proyectos.py                  # origen='manual'
-    python sync_proyectos.py --origen auto_carga_diario
+    from services.proyecto_sync_service import sincronizar
+    resultado = sincronizar(origen="auto_carga_diario")
 """
-import argparse
 import logging
 import os
-import sys
-from datetime import datetime, date
+from datetime import datetime
 from decimal import Decimal
 
 import psycopg2
@@ -30,22 +28,18 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-)
-log = logging.getLogger("sync_proyectos")
+log = logging.getLogger("proyecto_sync_service")
 
-# ── Configuración de conexiones ────────────────────────────────────────────
-CONN_REPORTEAPP = os.environ["DATABASE_URL"]
 
-CONN_EXTERNA = os.environ.get("EXTERNAL_DB_URL")
-if not CONN_EXTERNA:
-    log.error(
-        "EXTERNAL_DB_URL no está configurada. "
-        "Agregá la variable al archivo .env antes de ejecutar este script."
-    )
-    sys.exit(1)
+def _conn_externa() -> str:
+    dsn = os.environ.get("EXTERNAL_DB_URL")
+    if not dsn:
+        raise ValueError("EXTERNAL_DB_URL no está configurada en el .env")
+    return dsn
+
+
+def _conn_reporteapp() -> str:
+    return os.environ["DATABASE_URL"]
 
 
 # ── Helpers de validación ───────────────────────────────────────────────────
@@ -296,36 +290,22 @@ def sincronizar(origen: str = "manual") -> dict:
     Ejecuta la sincronización completa (proyectos + presupuestos) y devuelve
     un resumen. Abre y cierra sus propias conexiones — no depende del caller.
     """
-    log.info("Conectando a la base de datos externa...")
-    conn_ext = psycopg2.connect(CONN_EXTERNA)
-
-    log.info("Conectando a la base de datos de ReporteApp...")
-    conn_app = psycopg2.connect(CONN_REPORTEAPP)
+    conn_ext = psycopg2.connect(_conn_externa())
+    conn_app = psycopg2.connect(_conn_reporteapp())
 
     try:
-        log.info("Leyendo proyectos desde la DB externa...")
         proyectos = leer_proyectos_externa(conn_ext)
-        log.info(f"  {len(proyectos)} proyectos leídos.")
-
-        log.info("Leyendo proy_presupuestos desde la DB externa...")
         presupuestos = leer_presupuestos_externa(conn_ext)
-        log.info(f"  {len(presupuestos)} presupuestos leídos.")
 
-        log.info("Sincronizando proyectos hacia ReporteApp...")
         p_ok, p_err, p_errores = upsert_proyectos(conn_app, proyectos)
-        log.info(f"  Proyectos: {p_ok} OK, {p_err} con error.")
 
         # IDs de proyectos que sí se sincronizaron correctamente (para validar FK)
         proyectos_validos = {row["id"] for row in proyectos if not validar_proyecto(row)}
 
-        log.info("Sincronizando presupuestos hacia ReporteApp...")
         b_ok, b_err, b_errores = upsert_presupuestos(conn_app, presupuestos, proyectos_validos)
-        log.info(f"  Presupuestos: {b_ok} OK, {b_err} con error.")
 
         detalle_total = p_errores + b_errores
         registrar_log(conn_app, origen, p_ok, p_err, b_ok, b_err, detalle_total)
-
-        log.info("Sincronización completa. Log registrado en sync_proyectos_log.")
 
         return {
             "proyectos_ok": p_ok,
@@ -338,26 +318,3 @@ def sincronizar(origen: str = "manual") -> dict:
     finally:
         conn_ext.close()
         conn_app.close()
-
-
-# ── Main (CLI) ─────────────────────────────────────────────────────────────
-
-def main():
-    parser = argparse.ArgumentParser(description="Sincroniza proyectos y presupuestos desde DB externa.")
-    parser.add_argument(
-        "--origen", default="manual",
-        choices=["manual", "auto_carga_diario"],
-        help="Origen de la sincronización (para el log).",
-    )
-    args = parser.parse_args()
-
-    resultado = sincronizar(args.origen)
-    p_err, b_err = resultado["proyectos_error"], resultado["presupuestos_error"]
-
-    if p_err or b_err:
-        log.warning(f"Hubo {p_err + b_err} errores. Revisá el detalle en sync_proyectos_log.")
-        sys.exit(1)
-
-
-if __name__ == "__main__":
-    main()

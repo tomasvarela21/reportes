@@ -69,3 +69,25 @@ if pbi_configurado:
                 st.success("✅ Refresh iniciado. El dataset se actualizará en los próximos minutos.")
             else:
                 st.error(f"❌ {resultado['error']}")
+
+        st.caption("Sincronizá proyectos y presupuestos desde el sistema de gestión externo.")
+        if st.button("🔄 Sincronizar proyectos", type="secondary", use_container_width=True):
+            import sys
+            sys.path.append(os.path.join(os.path.dirname(__file__), 'services'))
+            from proyecto_sync_service import sincronizar
+            with st.spinner("Sincronizando proyectos y presupuestos..."):
+                try:
+                    resultado = sincronizar(origen="manual")
+                except Exception as e:
+                    st.error(f"❌ Error al sincronizar: {e}")
+                else:
+                    st.success(
+                        f"✅ Proyectos: {resultado['proyectos_ok']} OK, "
+                        f"{resultado['proyectos_error']} con error · "
+                        f"Presupuestos: {resultado['presupuestos_ok']} OK, "
+                        f"{resultado['presupuestos_error']} con error."
+                    )
+                    if resultado["errores"]:
+                        with st.expander("Ver detalle de errores"):
+                            for err in resultado["errores"]:
+                                st.write(f"- {err}")

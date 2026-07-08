@@ -23,7 +23,7 @@ def reset_estado():
 
 def reset_completo():
     for k in ['parse_result','periodos_info','decisiones','centros_agregados',
-              'carga_exitosa','empresa_sugerida']:
+              'carga_exitosa','empresa_sugerida','sync_proyectos_resultado']:
         st.session_state.pop(k, None)
 
 def agregar_cuenta_db(conn, nro_cta, extendido, nombre, rubro, tipo, moneda):
@@ -77,6 +77,23 @@ if 'carga_exitosa' in st.session_state:
         f"📊 **Mayor recalculado** desde **{desde_label}** hasta **{hasta_label}** "
         f"— {r['registros_mayor']:,} registros generados en `libro_mayor`."
     )
+
+    sync_result = st.session_state.get('sync_proyectos_resultado')
+    if sync_result is not None:
+        st.divider()
+        if "error_fatal" in sync_result:
+            st.warning(f"⚠️ No se pudo sincronizar proyectos: {sync_result['error_fatal']}")
+        else:
+            st.success(
+                f"🔄 Proyectos sincronizados — "
+                f"Proyectos: {sync_result['proyectos_ok']} OK, {sync_result['proyectos_error']} con error · "
+                f"Presupuestos: {sync_result['presupuestos_ok']} OK, {sync_result['presupuestos_error']} con error."
+            )
+            if sync_result["errores"]:
+                with st.expander("Ver detalle de errores de sincronización"):
+                    for err in sync_result["errores"]:
+                        st.write(f"- {err}")
+
     st.divider()
     if st.button("📤 Cargar otro archivo", type="primary"):
         reset_completo()
@@ -341,6 +358,14 @@ if periodos_reemplazar and not hay_errores_pendientes:
                 'periodos':           resultado.periodos_cargados,
                 'empresa':            empresa_nombre,
             }
+
+            with st.spinner("Sincronizando proyectos..."):
+                try:
+                    from proyecto_sync_service import sincronizar
+                    st.session_state['sync_proyectos_resultado'] = sincronizar(origen="auto_carga_diario")
+                except Exception as e:
+                    st.session_state['sync_proyectos_resultado'] = {"error_fatal": str(e)}
+
             st.rerun()
         else:
             for err in resultado.errores:
