@@ -332,66 +332,6 @@ def parsear_plan_cuentas(archivo) -> tuple:
     return df[[c for c in cols_out if c in df.columns]].copy(), errores, advertencias, cols_extra_normalized
 
 
-def parsear_proyectos(archivo) -> tuple:
-    """Mantenida por compatibilidad con el flujo legacy."""
-    errores = []; advertencias = []
-    nombre_arch = getattr(archivo, 'name', '')
-    try:
-        if nombre_arch.endswith('.xlsx') or nombre_arch.endswith('.xls'):
-            df = pd.read_excel(archivo, dtype=str)
-        else:
-            for enc in ['utf-8-sig', 'latin-1', 'utf-8']:
-                try:
-                    archivo.seek(0)
-                    df = pd.read_csv(archivo, sep=';', dtype=str, keep_default_na=False, encoding=enc)
-                    break
-                except UnicodeDecodeError:
-                    continue
-            else:
-                errores.append("No se pudo leer el archivo.")
-                return pd.DataFrame(), errores, advertencias
-    except Exception as e:
-        errores.append(f"Error: {e}"); return pd.DataFrame(), errores, advertencias
-
-    df.columns = [c.strip() for c in df.columns]
-    col_map = {
-        'ccosto':'ccosto','Ccosto':'ccosto','Nombre':'nombre','nombre':'nombre',
-        'fcInicio':'fc_inicio','fc_inicio':'fc_inicio','fcFin':'fc_fin','fc_fin':'fc_fin',
-        'Ingresos':'ingresos','ingresos':'ingresos',
-        'cto_Mo_Propia':'cto_mo_propia','cto_mo_propia':'cto_mo_propia',
-        'cto_Mo_Terceros':'cto_mo_terceros','cto_mo_terceros':'cto_mo_terceros',
-        'cto_Materiales':'cto_materiales','cto_materiales':'cto_materiales',
-        'cto_Herramientas':'cto_herramientas','cto_herramientas':'cto_herramientas',
-        'Superficie':'superficie','superficie':'superficie',
-    }
-    df = df.rename(columns={c: col_map[c] for c in df.columns if c in col_map})
-    if 'ccosto' not in df.columns:
-        errores.append("No se encontró columna 'ccosto'."); return pd.DataFrame(), errores, advertencias
-    if 'nombre' not in df.columns:
-        errores.append("No se encontró columna 'Nombre'."); return pd.DataFrame(), errores, advertencias
-
-    df['ccosto'] = df['ccosto'].astype(str).str.strip()
-    df = df[df['ccosto'].str.len() > 0].copy()
-
-    for col in ['fc_inicio','fc_fin']:
-        df[col] = pd.to_datetime(df[col], errors='coerce').dt.date if col in df.columns else None
-
-    def parse_num(v):
-        if v is None or str(v).strip() in ('','nan','NaN','None'): return None
-        try: return float(str(v).replace(',','.'))
-        except: return None
-
-    for col in ['ingresos','cto_mo_propia','cto_mo_terceros','cto_materiales',
-                'cto_herramientas','superficie']:
-        df[col] = df[col].apply(parse_num) if col in df.columns else None
-
-    df['nombre'] = df['nombre'].astype(str).str.strip()
-    df = df.drop_duplicates(subset=['ccosto'], keep='last')
-    advertencias.append(f"{len(df)} proyectos encontrados en el archivo.")
-    cols_out = ['ccosto','nombre','fc_inicio','fc_fin','ingresos','cto_mo_propia',
-                'cto_mo_terceros','cto_materiales','cto_herramientas','superficie']
-    return df[[c for c in cols_out if c in df.columns]].copy(), errores, advertencias
-
 # ── Upserts ───────────────────────────────────────────────────────────────────
 
 def aplicar_upsert_plan(conn, df: pd.DataFrame,
@@ -468,35 +408,6 @@ def aplicar_upsert_plan(conn, df: pd.DataFrame,
     conn.commit(); cur.close()
     return nuevas, actualizadas
 
-
-def aplicar_upsert_proyectos(conn, df: pd.DataFrame) -> tuple:
-    from datetime import datetime
-    cur = conn.cursor()
-    cur.execute("SELECT ccosto FROM proyectos")
-    existentes = {r[0] for r in cur.fetchall()}
-    nuevos = len(df[~df['ccosto'].isin(existentes)])
-    actualizados = len(df[df['ccosto'].isin(existentes)])
-    psycopg2.extras.execute_values(cur, """
-        INSERT INTO proyectos
-            (ccosto, nombre, fc_inicio, fc_fin, ingresos,
-             cto_mo_propia, cto_mo_terceros, cto_materiales,
-             cto_herramientas, superficie, actualizado_en)
-        VALUES %s
-        ON CONFLICT (ccosto) DO UPDATE SET
-            nombre=EXCLUDED.nombre, fc_inicio=EXCLUDED.fc_inicio, fc_fin=EXCLUDED.fc_fin,
-            ingresos=EXCLUDED.ingresos, cto_mo_propia=EXCLUDED.cto_mo_propia,
-            cto_mo_terceros=EXCLUDED.cto_mo_terceros, cto_materiales=EXCLUDED.cto_materiales,
-            cto_herramientas=EXCLUDED.cto_herramientas,
-            superficie=EXCLUDED.superficie, actualizado_en=now()
-    """, [
-        (r['ccosto'], r['nombre'], r.get('fc_inicio'), r.get('fc_fin'),
-         r.get('ingresos'), r.get('cto_mo_propia'), r.get('cto_mo_terceros'),
-         r.get('cto_materiales'), r.get('cto_herramientas'),
-         r.get('superficie'), datetime.now())
-        for _, r in df.iterrows()
-    ], page_size=100)
-    conn.commit(); cur.close()
-    return nuevos, actualizados
 
 # ── UI ─────────────────────────────────────────────────────────────────────────
 
@@ -998,70 +909,40 @@ with tabs[3]:
     st.subheader("🏗️ Proyectos")
     st.caption("Gestión de proyectos y presupuestos. Se vincula con libro_mayor por centro de costo.")
 
-    # ── Pantallas de éxito — ANTES de los subtabs para que el rerun las muestre ──
-    if 'proyectos_cargados' in st.session_state:
-        r = st.session_state['proyectos_cargados']
-        st.success(
-            f"✅ Proyectos actualizados desde **{r['archivo']}** — "
-            f"{r['nuevos']} nuevos, {r['actualizados']} actualizados, "
-            f"{r['inactivos']} marcados inactivos."
-        )
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Nuevos",       r['nuevos'])
-        c2.metric("Actualizados", r['actualizados'])
-        c3.metric("Inactivos",    r['inactivos'])
-        st.divider()
-        if st.button("📥 Cargar otro archivo de proyectos", type="primary", key="btn_otro_proy"):
-            st.session_state.pop('proyectos_cargados', None); st.rerun()
-        st.stop()
-
-    if 'presupuestos_cargados' in st.session_state:
-        r = st.session_state['presupuestos_cargados']
-        st.success(
-            f"✅ Presupuestos actualizados desde **{r['archivo']}** — "
-            f"{r['nuevos']} nuevos, {r['actualizados']} actualizados."
-        )
-        c1, c2 = st.columns(2)
-        c1.metric("Nuevos",       r['nuevos'])
-        c2.metric("Actualizados", r['actualizados'])
-        st.divider()
-        if st.button("📊 Cargar otro archivo de presupuestos", type="primary", key="btn_otro_presp"):
-            st.session_state.pop('presupuestos_cargados', None); st.rerun()
-        st.stop()
-
-    subtab_lista, subtab_proyectos, subtab_presupuestos = st.tabs([
-        "📋 Listado", "📥 Actualizar Proyectos", "📊 Cargar Presupuestos"
-    ])
+    # Solo se habilita la visualización — la carga de proyectos y presupuestos
+    # se hace vía sincronización automática con el sistema externo
+    # (services/proyecto_sync_service.py). La baja lógica se resuelve en el
+    # propio sync: un proyecto/presupuesto dado de baja en origen se borra de
+    # esta tabla, por lo que todo lo que aparece acá está activo.
+    (subtab_lista,) = st.tabs(["📋 Listado"])
 
     # ── Subtab: Listado ────────────────────────────────────────────────────────
     with subtab_lista:
         try:
             cur = conn.cursor()
             cur.execute("""
-                SELECT id_origen, ccosto, nombre, estado, fc_inicio, fc_fin,
-                       ingresos, cto_mo_propia, cto_mo_terceros, cto_materiales,
-                       cto_herramientas, superficie, comentario, activo, actualizado_en
+                SELECT id, centro_costo, nombre, estado, fecha_inicio, fecha_final,
+                       ingresos, importe_mo, terceros, importe_mat,
+                       herramientas, superficie, comentario, updated_at
                 FROM proyectos ORDER BY nombre
             """)
-            cols_p = ['ID Origen','CCosto','Nombre','Estado','Inicio','Fin',
+            cols_p = ['ID','Centro Costo','Nombre','Estado','Inicio','Fin',
                       'Ingresos','Cto MO Propia','Cto MO Terceros','Cto Materiales',
-                      'Cto Herramientas','Superficie m²','Comentario','Activo','Actualizado']
+                      'Cto Herramientas','Superficie m²','Comentario','Actualizado']
             df_proy = pd.DataFrame(cur.fetchall(), columns=cols_p); cur.close()
+            cols_num_p = ['Ingresos','Cto MO Propia','Cto MO Terceros',
+                          'Cto Materiales','Cto Herramientas','Superficie m²']
+            for c in cols_num_p:
+                df_proy[c] = pd.to_numeric(df_proy[c], errors='coerce')
         except Exception:
             conn = get_conn(); df_proy = pd.DataFrame()
 
         if not df_proy.empty:
-            activos   = df_proy['Activo'].sum() if 'Activo' in df_proy.columns else 0
-            inactivos = len(df_proy) - activos
-            c1, c2, c3, c4 = st.columns(4)
+            c1, c2 = st.columns(2)
             c1.metric("Total proyectos", len(df_proy))
-            c2.metric("Activos",         int(activos))
-            c3.metric("Inactivos",       int(inactivos))
-            c4.metric("Ingresos total",  f"${df_proy['Ingresos'].astype(float).sum():,.0f}")
+            c2.metric("Ingresos total",  f"${df_proy['Ingresos'].astype(float).sum():,.0f}")
 
-            mostrar_inactivos = st.checkbox("Mostrar inactivos", value=False, key="chk_inactivos_proy")
-            df_show_p = df_proy if mostrar_inactivos else df_proy[df_proy['Activo'] == True]
-            st.dataframe(df_show_p, use_container_width=True, hide_index=True,
+            st.dataframe(df_proy, use_container_width=True, hide_index=True,
                 column_config={
                     "Ingresos":        st.column_config.NumberColumn(format="$ %.0f"),
                     "Cto MO Propia":   st.column_config.NumberColumn(format="$ %.0f"),
@@ -1080,12 +961,16 @@ with tabs[3]:
                     SELECT pp.id, p.nombre, pp.fecha, pp.mo_propia, pp.mo_terceros,
                            pp.materiales, pp.herramientas, pp.horas, pp.metros, pp.importe
                     FROM proy_presupuestos pp
-                    JOIN proyectos p ON p.id_origen = pp.proyecto_id
+                    JOIN proyectos p ON p.id = pp.proyecto_id
                     ORDER BY pp.fecha DESC, p.nombre
                 """)
                 cols_pp = ['ID','Proyecto','Fecha','MO Propia','MO Terceros',
                            'Materiales','Herramientas','Horas','Metros','Importe']
                 df_pp = pd.DataFrame(cur2.fetchall(), columns=cols_pp); cur2.close()
+                cols_num_pp = ['MO Propia','MO Terceros','Materiales',
+                               'Herramientas','Horas','Metros','Importe']
+                for c in cols_num_pp:
+                    df_pp[c] = pd.to_numeric(df_pp[c], errors='coerce')
             except Exception:
                 df_pp = pd.DataFrame()
 
@@ -1106,289 +991,6 @@ with tabs[3]:
                     })
         else:
             st.info("No hay proyectos cargados aún.")
-
-    # ── Subtab: Actualizar Proyectos ───────────────────────────────────────────
-    with subtab_proyectos:
-        st.caption("Subí el CSV de proyectos. Los existentes se actualizan, los nuevos se agregan, los eliminados se marcan inactivos.")
-        st.code("id, nombre, fecha_inicio, fecha_final, estado, importe_mat, importe_mo, terceros, herramientas, superficie, ingresos, centro_costo, comentario, deleted_at, ...")
-
-        archivo_proy = st.file_uploader(
-            "CSV de proyectos", type=["csv","xlsx"], key="proy_uploader_new"
-        )
-        if archivo_proy:
-                # Parsear
-                try:
-                    if archivo_proy.name.endswith('.xlsx'):
-                        df_raw_p = pd.read_excel(archivo_proy, dtype=str)
-                    else:
-                        for enc in ['latin-1','utf-8-sig','utf-8']:
-                            try:
-                                archivo_proy.seek(0)
-                                df_raw_p = pd.read_csv(archivo_proy, sep=',', dtype=str, encoding=enc).fillna('')
-                                break
-                            except UnicodeDecodeError: continue
-                except Exception as e:
-                    st.error(f"❌ Error al leer archivo: {e}"); st.stop()
-
-                df_raw_p.columns = [c.strip() for c in df_raw_p.columns]
-
-                # Validar columnas mínimas
-                required = {'id','nombre'}
-                missing = required - set(df_raw_p.columns)
-                if missing:
-                    st.error(f"❌ Faltan columnas requeridas: {missing}"); st.stop()
-
-                def pnum(v):
-                    try: return float(str(v).strip().replace(',','.')) if str(v).strip() else None
-                    except: return None
-
-                def pdate(v):
-                    try: return pd.Timestamp(str(v).strip()).date() if str(v).strip() else None
-                    except: return None
-
-                df_raw_p['id']           = pd.to_numeric(df_raw_p['id'], errors='coerce')
-                df_raw_p = df_raw_p[df_raw_p['id'].notna()].copy()
-                df_raw_p['id'] = df_raw_p['id'].astype(int)
-
-                # Mapeo de columnas CSV → DB
-                col_map_p = {
-                    'fecha_inicio':  'fc_inicio',
-                    'fecha_final':   'fc_fin',
-                    'importe_mat':   'cto_materiales',
-                    'importe_mo':    'cto_mo_propia',
-                    'terceros':      'cto_mo_terceros',
-                    'herramientas':  'cto_herramientas',
-                    'centro_costo':  'ccosto',
-                }
-                df_raw_p = df_raw_p.rename(columns=col_map_p)
-
-                # Métricas preview
-                cur3 = conn.cursor()
-                cur3.execute("SELECT id_origen FROM proyectos WHERE id_origen IS NOT NULL")
-                ids_db = {r[0] for r in cur3.fetchall()}; cur3.close()
-
-                ids_arch    = set(df_raw_p['id'].tolist())
-                deleted     = df_raw_p[df_raw_p.get('deleted_at', pd.Series([''] * len(df_raw_p))) != '']['id'].tolist() if 'deleted_at' in df_raw_p.columns else []
-                nuevos_ids  = ids_arch - ids_db - set(deleted)
-                act_ids     = ids_arch & ids_db - set(deleted)
-
-                st.divider()
-                c1, c2, c3, c4 = st.columns(4)
-                c1.metric("Total en archivo",  len(df_raw_p))
-                c2.metric("Proyectos nuevos",  len(nuevos_ids))
-                c3.metric("A actualizar",      len(act_ids))
-                c4.metric("A marcar inactivos", len(deleted))
-
-                # Preview
-                cols_show = [c for c in ['id','nombre','estado','fc_inicio','fc_fin',
-                              'ccosto','ingresos','cto_materiales','cto_mo_propia',
-                              'cto_mo_terceros','cto_herramientas','superficie','comentario']
-                             if c in df_raw_p.columns]
-                st.dataframe(df_raw_p[cols_show].head(20), use_container_width=True, hide_index=True)
-
-                # Advertencia inactivos
-                if deleted:
-                    st.warning(f"⚠️ {len(deleted)} proyecto(s) con `deleted_at` serán marcados como **inactivos**: IDs {deleted}")
-
-                st.divider()
-                if st.button("🏗️ Aplicar actualización de proyectos", type="primary", key="btn_aplicar_proy"):
-                    conn2 = get_conn()
-                    cur4 = conn2.cursor()
-                    n_nuevos = n_act = n_inact = 0
-                    try:
-                        from datetime import datetime
-                        ahora = datetime.now()
-                        for _, row in df_raw_p.iterrows():
-                            id_orig = int(row['id'])
-                            es_deleted = bool(row.get('deleted_at','').strip()) if 'deleted_at' in row else False
-
-                            vals = {
-                                'id_origen':       id_orig,
-                                'nombre':          str(row.get('nombre','')).strip(),
-                                'ccosto':          str(row.get('ccosto','')).strip() or None,
-                                'fc_inicio':       pdate(row.get('fc_inicio','')),
-                                'fc_fin':          pdate(row.get('fc_fin','')),
-                                'estado':          str(row.get('estado','')).strip() or None,
-                                'ingresos':        pnum(row.get('ingresos',0)),
-                                'cto_mo_propia':   pnum(row.get('cto_mo_propia',0)),
-                                'cto_mo_terceros': pnum(row.get('cto_mo_terceros',0)),
-                                'cto_materiales':  pnum(row.get('cto_materiales',0)),
-                                'cto_herramientas':pnum(row.get('cto_herramientas',0)),
-                                'superficie':      pnum(row.get('superficie','')),
-                                'comentario':      str(row.get('comentario','')).strip() or None,
-                                'oportunidad_id':  int(float(row['oportunidad_id'])) if str(row.get('oportunidad_id','')).strip() else None,
-                                'responsable_id':  int(float(row['responsable_id'])) if str(row.get('responsable_id','')).strip() else None,
-                                'version':         int(float(row['version'])) if str(row.get('version','')).strip() else None,
-                                'activo':          not es_deleted,
-                                'deleted_at':      pdate(row.get('deleted_at','')) if es_deleted else None,
-                                'actualizado_en':  ahora,
-                            }
-
-                            # ccosto puede ser None para proyectos sin centro de costo
-                            # usar id_origen como clave de upsert
-                            cur4.execute("SELECT ccosto FROM proyectos WHERE id_origen = %s", (id_orig,))
-                            existe = cur4.fetchone()
-
-                            if existe:
-                                cur4.execute("""
-                                    UPDATE proyectos SET
-                                        nombre=%s, ccosto=%s, fc_inicio=%s, fc_fin=%s,
-                                        estado=%s, ingresos=%s, cto_mo_propia=%s,
-                                        cto_mo_terceros=%s, cto_materiales=%s, cto_herramientas=%s,
-                                        superficie=%s, comentario=%s, oportunidad_id=%s,
-                                        responsable_id=%s, version=%s, activo=%s,
-                                        deleted_at=%s, actualizado_en=%s
-                                    WHERE id_origen=%s
-                                """, (vals['nombre'], vals['ccosto'], vals['fc_inicio'], vals['fc_fin'],
-                                      vals['estado'], vals['ingresos'], vals['cto_mo_propia'],
-                                      vals['cto_mo_terceros'], vals['cto_materiales'], vals['cto_herramientas'],
-                                      vals['superficie'], vals['comentario'], vals['oportunidad_id'],
-                                      vals['responsable_id'], vals['version'], vals['activo'],
-                                      vals['deleted_at'], vals['actualizado_en'], id_orig))
-                                if es_deleted: n_inact += 1
-                                else: n_act += 1
-                            else:
-                                # Para proyectos sin ccosto usar id como ccosto temporalmente
-                                ccosto_final = vals['ccosto'] or str(id_orig)
-                                cur4.execute("""
-                                    INSERT INTO proyectos (
-                                        id_origen, ccosto, nombre, fc_inicio, fc_fin,
-                                        estado, ingresos, cto_mo_propia, cto_mo_terceros,
-                                        cto_materiales, cto_herramientas, superficie,
-                                        comentario, oportunidad_id, responsable_id,
-                                        version, activo, deleted_at, actualizado_en
-                                    ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-                                """, (id_orig, ccosto_final, vals['nombre'], vals['fc_inicio'], vals['fc_fin'],
-                                      vals['estado'], vals['ingresos'], vals['cto_mo_propia'], vals['cto_mo_terceros'],
-                                      vals['cto_materiales'], vals['cto_herramientas'], vals['superficie'],
-                                      vals['comentario'], vals['oportunidad_id'], vals['responsable_id'],
-                                      vals['version'], vals['activo'], vals['deleted_at'], vals['actualizado_en']))
-                                if es_deleted: n_inact += 1
-                                else: n_nuevos += 1
-
-                        conn2.commit(); cur4.close()
-                        st.session_state['proyectos_cargados'] = {
-                            'archivo': archivo_proy.name,
-                            'nuevos': n_nuevos, 'actualizados': n_act, 'inactivos': n_inact
-                        }
-                        st.rerun()
-                    except Exception as e:
-                        conn2.rollback(); cur4.close()
-                        st.error(f"❌ Error al actualizar proyectos: {e}")
-
-    # ── Subtab: Cargar Presupuestos ────────────────────────────────────────────
-    with subtab_presupuestos:
-        st.caption("Subí el CSV de presupuestos por período. Los registros existentes (mismo ID) se actualizan, los nuevos se agregan.")
-        st.code("id, proyecto_id, fecha, mo_propia, mo_terceros, materiales, herramientas, horas, metros, importe, descripcion")
-
-        archivo_presp = st.file_uploader(
-            "CSV de presupuestos", type=["csv","xlsx"], key="presp_uploader"
-        )
-        if archivo_presp:
-                try:
-                    if archivo_presp.name.endswith('.xlsx'):
-                        df_presp = pd.read_excel(archivo_presp, dtype=str)
-                    else:
-                        for enc in ['latin-1','utf-8-sig','utf-8']:
-                            try:
-                                archivo_presp.seek(0)
-                                df_presp = pd.read_csv(archivo_presp, sep=',', dtype=str, encoding=enc).fillna('')
-                                break
-                            except UnicodeDecodeError: continue
-                except Exception as e:
-                    st.error(f"❌ Error al leer archivo: {e}"); st.stop()
-
-                df_presp.columns = [c.strip() for c in df_presp.columns]
-
-                # Validar columnas mínimas
-                req_pp = {'id','proyecto_id','fecha'}
-                miss_pp = req_pp - set(df_presp.columns)
-                if miss_pp:
-                    st.error(f"❌ Faltan columnas requeridas: {miss_pp}"); st.stop()
-
-                df_presp['id']          = pd.to_numeric(df_presp['id'], errors='coerce')
-                df_presp['proyecto_id'] = pd.to_numeric(df_presp['proyecto_id'], errors='coerce')
-                df_presp = df_presp[df_presp['id'].notna() & df_presp['proyecto_id'].notna()].copy()
-                df_presp['id']          = df_presp['id'].astype(int)
-                df_presp['proyecto_id'] = df_presp['proyecto_id'].astype(int)
-
-                # Validar que los proyecto_id existan en DB
-                cur5 = conn.cursor()
-                cur5.execute("SELECT DISTINCT id_origen FROM proyectos WHERE id_origen IS NOT NULL")
-                ids_proy_db = {r[0] for r in cur5.fetchall()}
-
-                cur5.execute("SELECT id FROM proy_presupuestos")
-                ids_presp_db = {r[0] for r in cur5.fetchall()}
-                cur5.close()
-
-                proy_ids_arch    = set(df_presp['proyecto_id'].unique())
-                proy_invalidos   = proy_ids_arch - ids_proy_db
-                ids_presp_nuevos = set(df_presp['id'].tolist()) - ids_presp_db
-                ids_presp_act    = set(df_presp['id'].tolist()) & ids_presp_db
-
-                # Métricas
-                c1, c2, c3 = st.columns(3)
-                c1.metric("Registros en archivo", len(df_presp))
-                c2.metric("Nuevos",               len(ids_presp_nuevos))
-                c3.metric("A actualizar",         len(ids_presp_act))
-
-                if proy_invalidos:
-                    st.error(f"❌ proyecto_id no encontrados en la DB: {sorted(proy_invalidos)}. Cargá primero los proyectos.")
-                    st.stop()
-
-                # Preview
-                st.dataframe(df_presp.head(20), use_container_width=True, hide_index=True)
-                st.divider()
-
-                if st.button("📊 Aplicar carga de presupuestos", type="primary", key="btn_aplicar_presp"):
-                    conn2 = get_conn(); cur6 = conn2.cursor()
-                    n_nuevos_pp = n_act_pp = 0
-                    try:
-                        def pnum2(v):
-                            try: return float(str(v).strip().replace(',','.')) if str(v).strip() else 0.0
-                            except: return 0.0
-
-                        for _, row in df_presp.iterrows():
-                            rid  = int(row['id'])
-                            vals = (
-                                int(row['proyecto_id']),
-                                row.get('fecha','').strip(),
-                                pnum2(row.get('mo_propia',0)),
-                                pnum2(row.get('mo_terceros',0)),
-                                pnum2(row.get('materiales',0)),
-                                pnum2(row.get('herramientas',0)),
-                                pnum2(row.get('horas',0)),
-                                pnum2(row.get('metros',0)),
-                                pnum2(row.get('importe',0)),
-                                str(row.get('descripcion','')).strip() or None,
-                            )
-                            if rid in ids_presp_db:
-                                cur6.execute("""
-                                    UPDATE proy_presupuestos SET
-                                        proyecto_id=%s, fecha=%s, mo_propia=%s, mo_terceros=%s,
-                                        materiales=%s, herramientas=%s, horas=%s, metros=%s,
-                                        importe=%s, descripcion=%s
-                                    WHERE id=%s
-                                """, (*vals, rid))
-                                n_act_pp += 1
-                            else:
-                                cur6.execute("""
-                                    INSERT INTO proy_presupuestos
-                                        (id, proyecto_id, fecha, mo_propia, mo_terceros,
-                                         materiales, herramientas, horas, metros, importe, descripcion)
-                                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-                                """, (rid, *vals))
-                                n_nuevos_pp += 1
-
-                        conn2.commit(); cur6.close()
-                        st.session_state['presupuestos_cargados'] = {
-                            'archivo': archivo_presp.name,
-                            'nuevos': n_nuevos_pp, 'actualizados': n_act_pp
-                        }
-                        st.rerun()
-                    except Exception as e:
-                        conn2.rollback(); cur6.close()
-                        st.error(f"❌ Error al cargar presupuestos: {e}")
 
 # ── Tab 5: Centros de Costo ────────────────────────────────────────────────────
 with tabs[4]:

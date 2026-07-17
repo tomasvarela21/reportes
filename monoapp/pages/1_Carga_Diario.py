@@ -273,23 +273,37 @@ if periodos_existentes:
 else:
     reemplazar_todos = False
 
-for info in periodos_info:
-    key   = (info.periodo_anio, info.periodo_mes)
-    label = f"{MESES[info.periodo_mes]} {info.periodo_anio}"
-    if info.existe:
-        st.warning(
-            f"⚠️ **{label}** ya tiene {info.total_registros:,} registros "
-            f"(cargado el {info.fecha_carga.strftime('%d/%m/%Y') if info.fecha_carga else '—'} "
-            f"desde `{info.archivo_origen or '—'}`)"
-        )
-        decisiones[key] = st.checkbox(
-            f"Reemplazar {label}",
-            value=reemplazar_todos,
-            key=f"reemplazar_{key}"
-        )
-    else:
-        st.success(f"✅ **{label}** — período nuevo, se cargará sin conflictos.")
-        decisiones[key] = True
+if reemplazar_todos and periodos_existentes:
+    # Vista colapsada: un solo mensaje en lugar de la lista entera
+    periodos_nuevos = [info for info in periodos_info if not info.existe]
+    msg_nuevos = (
+        f" Se agregarán también **{len(periodos_nuevos)}** período(s) nuevo(s)."
+        if periodos_nuevos else ""
+    )
+    st.success(
+        f"✅ Los **{len(periodos_existentes)}** período(s) existentes serán "
+        f"reemplazados.{msg_nuevos}"
+    )
+    for info in periodos_info:
+        decisiones[(info.periodo_anio, info.periodo_mes)] = True
+else:
+    for info in periodos_info:
+        key   = (info.periodo_anio, info.periodo_mes)
+        label = f"{MESES[info.periodo_mes]} {info.periodo_anio}"
+        if info.existe:
+            st.warning(
+                f"⚠️ **{label}** ya tiene {info.total_registros:,} registros "
+                f"(cargado el {info.fecha_carga.strftime('%d/%m/%Y') if info.fecha_carga else '—'} "
+                f"desde `{info.archivo_origen or '—'}`)"
+            )
+            decisiones[key] = st.checkbox(
+                f"Reemplazar {label}",
+                value=reemplazar_todos,
+                key=f"reemplazar_{key}"
+            )
+        else:
+            st.success(f"✅ **{label}** — período nuevo, se cargará sin conflictos.")
+            decisiones[key] = True
 
 periodos_bloqueados  = [k for k, v in decisiones.items() if not v]
 periodos_reemplazar  = {k: v for k, v in decisiones.items() if v}
