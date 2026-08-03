@@ -51,6 +51,7 @@ NAV_LINKS = [
     ("🔍", "Data Check",        "pages/6_Chequeo_Consistencia.py"),
     ("⚙️", "Administracion",    "pages/5_Administracion.py"),
     ("📈", "Reporte Power BI",  "pages/7_Reporte_PowerBI.py"),
+    ("🔄", "Sync Cohen",        "pages/8_Sincronizacion_Cohen.py"),
 ]
 
 def _existe(rel_path: str) -> bool:
