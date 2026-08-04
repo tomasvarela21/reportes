@@ -1,7 +1,7 @@
 import os, sys, streamlit as st, pandas as pd
 from dotenv import load_dotenv
 from services.db import get_conn
-from services.styles import apply_styles, render_sidebar
+from services.styles import apply_styles, render_sidebar, render_resultado_sync
 load_dotenv()
 
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'services'))
@@ -84,15 +84,7 @@ if 'carga_exitosa' in st.session_state:
         if "error_fatal" in sync_result:
             st.warning(f"⚠️ No se pudo sincronizar proyectos: {sync_result['error_fatal']}")
         else:
-            st.success(
-                f"🔄 Proyectos sincronizados — "
-                f"Proyectos: {sync_result['proyectos_ok']} OK, {sync_result['proyectos_error']} con error · "
-                f"Presupuestos: {sync_result['presupuestos_ok']} OK, {sync_result['presupuestos_error']} con error."
-            )
-            if sync_result["errores"]:
-                with st.expander("Ver detalle de errores de sincronización"):
-                    for err in sync_result["errores"]:
-                        st.write(f"- {err}")
+            render_resultado_sync(sync_result, titulo="Proyectos sincronizados")
 
     st.divider()
     if st.button("📤 Cargar otro archivo", type="primary"):

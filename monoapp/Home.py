@@ -2,7 +2,7 @@
 Home.py — ReporteApp v2
 """
 import streamlit as st
-from services.styles import apply_styles, render_sidebar
+from services.styles import apply_styles, render_sidebar, render_resultado_sync
 
 st.set_page_config(
     page_title="ReporteApp",
@@ -81,13 +81,4 @@ if pbi_configurado:
                 except Exception as e:
                     st.error(f"❌ Error al sincronizar: {e}")
                 else:
-                    st.success(
-                        f"✅ Proyectos: {resultado['proyectos_ok']} OK, "
-                        f"{resultado['proyectos_error']} con error · "
-                        f"Presupuestos: {resultado['presupuestos_ok']} OK, "
-                        f"{resultado['presupuestos_error']} con error."
-                    )
-                    if resultado["errores"]:
-                        with st.expander("Ver detalle de errores"):
-                            for err in resultado["errores"]:
-                                st.write(f"- {err}")
+                    render_resultado_sync(resultado)

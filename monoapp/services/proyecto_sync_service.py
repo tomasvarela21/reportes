@@ -1,11 +1,17 @@
 """
 services/proyecto_sync_service.py
 ==================================
-Sincroniza las tablas 'proyectos' y 'proy_presupuestos' desde la base de datos
-externa (sistema de gestión) hacia la base de datos de ReporteApp (Neon).
+Sincroniza las tablas 'proyectos' y 'proy_presupuestos', y la vista
+'vw_erp_presupuestos_resumen', desde la base de datos externa (sistema de
+gestión) hacia la base de datos de ReporteApp (Neon).
 
-El esquema de ambas tablas en ReporteApp es un espejo exacto del de la DB
-externa (mismas columnas y tipos) — no hay mapeo de nombres.
+El esquema de proyectos/proy_presupuestos en ReporteApp es un espejo exacto
+del de la DB externa (mismas columnas y tipos) — no hay mapeo de nombres.
+
+vw_erp_presupuestos_resumen es una vista calculada del lado externo (agrupa
+erp_presupuestos por proyecto_id + fecha, sin id propio ni baja lógica). Se
+mirrorea en Neon como tabla 'vw_erp_presup_resumen', con clave
+(proyecto_id, fecha).
 
 Lógica:
     1. Conecta a ambas bases.
@@ -16,7 +22,10 @@ Lógica:
     6. Borra de ReporteApp los presupuestos dados de baja individualmente
        (presupuesto de baja en un proyecto que sigue activo).
     7. Hace upsert de los presupuestos activos -> ON CONFLICT (id).
-    8. Registra el resultado en sync_proyectos_log.
+    8. Lee vw_erp_presupuestos_resumen desde la DB externa y reemplaza por
+       completo el contenido de vw_erp_presup_resumen en ReporteApp (no tiene
+       baja lógica propia, así que se sincroniza por reemplazo total).
+    9. Registra el resultado en sync_proyectos_log.
 
 Uso:
     from services.proyecto_sync_service import sincronizar
@@ -44,6 +53,11 @@ _PRESUPUESTOS_COLS = [
     "id", "proyecto_id", "fecha", "mo_propia", "mo_terceros", "materiales",
     "horas", "metros", "created_at", "updated_at", "deleted_at", "version",
     "importe", "herramientas", "descripcion",
+]
+
+_RESUMEN_COLS = [
+    "proyecto_id", "fecha", "mo_propia", "mo_terceros", "materiales",
+    "herramientas", "importe", "descripcion",
 ]
 
 
@@ -87,6 +101,17 @@ def validar_presupuesto(row: dict, proyectos_validos: set) -> list[str]:
     return errores
 
 
+def validar_resumen(row: dict, proyectos_validos: set) -> list[str]:
+    """Valida una fila de vw_erp_presupuestos_resumen. Devuelve lista de errores."""
+    errores = []
+    clave = f"proyecto_id={row.get('proyecto_id')} fecha={row.get('fecha')}"
+    if row.get("proyecto_id") not in proyectos_validos:
+        errores.append(f"{clave}: proyecto_id no existe entre los proyectos activos sincronizados")
+    if row.get("fecha") is None:
+        errores.append(f"{clave}: fecha vacía")
+    return errores
+
+
 # ── Lectura desde la DB externa ─────────────────────────────────────────────
 
 def leer_proyectos_externa(conn) -> list[dict]:
@@ -100,6 +125,17 @@ def leer_proyectos_externa(conn) -> list[dict]:
 def leer_presupuestos_externa(conn) -> list[dict]:
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     cur.execute(f"SELECT {', '.join(_PRESUPUESTOS_COLS)} FROM proy_presupuestos ORDER BY id;")
+    rows = cur.fetchall()
+    cur.close()
+    return [dict(r) for r in rows]
+
+
+def leer_resumen_externa(conn) -> list[dict]:
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    cur.execute(
+        f"SELECT {', '.join(_RESUMEN_COLS)} FROM vw_erp_presupuestos_resumen "
+        f"ORDER BY proyecto_id, fecha;"
+    )
     rows = cur.fetchall()
     cur.close()
     return [dict(r) for r in rows]
@@ -129,6 +165,64 @@ def eliminar_presupuestos_baja(conn, ids: set) -> int:
     conn.commit()
     cur.close()
     return borrados
+
+
+# ── Reemplazo total de vw_erp_presup_resumen ────────────────────────────────
+
+def reemplazar_resumen(conn, filas: list[dict], proyectos_validos: set) -> tuple[int, int, list[str]]:
+    """
+    Reemplaza por completo el contenido de vw_erp_presup_resumen en ReporteApp.
+    La vista de origen no tiene id propio ni baja lógica, así que no se puede
+    hacer upsert incremental: se borra todo y se vuelve a insertar lo válido,
+    en una única transacción.
+    Devuelve (ok, error, lista_de_errores).
+    """
+    validas = []
+    ok, error = 0, 0
+    detalle_errores = []
+
+    for row in filas:
+        errores = validar_resumen(row, proyectos_validos)
+        if errores:
+            error += 1
+            detalle_errores.extend(errores)
+            log.warning(f"Fila de resumen inválida, se omite: {errores}")
+            continue
+        validas.append(row)
+
+    cur = conn.cursor()
+    try:
+        cur.execute("DELETE FROM vw_erp_presup_resumen")
+        if validas:
+            psycopg2.extras.execute_values(
+                cur,
+                """
+                INSERT INTO vw_erp_presup_resumen (
+                    proyecto_id, fecha, mo_propia, mo_terceros, materiales,
+                    herramientas, importe, descripcion
+                ) VALUES %s
+                """,
+                [
+                    (
+                        r["proyecto_id"], r["fecha"], r["mo_propia"], r["mo_terceros"],
+                        r["materiales"], r["herramientas"], r["importe"], r["descripcion"],
+                    )
+                    for r in validas
+                ],
+            )
+        ok = len(validas)
+    except Exception as e:
+        conn.rollback()
+        error += len(validas)
+        msg = f"Error al reemplazar vw_erp_presup_resumen: {e}"
+        detalle_errores.append(msg)
+        log.error(msg)
+        ok = 0
+    else:
+        conn.commit()
+    cur.close()
+
+    return ok, error, detalle_errores
 
 
 # ── Upsert en ReporteApp ─────────────────────────────────────────────────────
@@ -307,7 +401,10 @@ def sincronizar(origen: str = "manual") -> dict:
 
         b_ok, b_err, b_errores = upsert_presupuestos(conn_app, presupuestos_activos, proyectos_validos)
 
-        detalle_total = p_errores + b_errores
+        resumen_filas = leer_resumen_externa(conn_ext)
+        r_ok, r_err, r_errores = reemplazar_resumen(conn_app, resumen_filas, proyectos_validos)
+
+        detalle_total = p_errores + b_errores + r_errores
         registrar_log(conn_app, origen, p_ok, p_err, b_ok, b_err, detalle_total)
 
         return {
@@ -317,6 +414,8 @@ def sincronizar(origen: str = "manual") -> dict:
             "presupuestos_ok": b_ok,
             "presupuestos_error": b_err,
             "presupuestos_baja": b_baja,
+            "resumen_ok": r_ok,
+            "resumen_error": r_err,
             "errores": detalle_total,
         }
 

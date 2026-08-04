@@ -79,3 +79,31 @@ def apply_styles(extra_css: str = "") -> None:
         f"<style>{SIDEBAR_CSS}{GLOBAL_CSS}{extra_css}</style>",
         unsafe_allow_html=True
     )
+
+def render_resultado_sync(resultado: dict, titulo: str = "Sincronización") -> None:
+    """
+    Muestra el resultado de sincronizar() con tres estados posibles:
+      - Todo OK (sin errores): solo mensaje de éxito.
+      - Todo con error (sin OK): solo mensaje de error.
+      - Mezcla: éxito y error mostrados por separado, bien diferenciados.
+    """
+    detalle = [
+        ("Proyectos", resultado["proyectos_ok"], resultado["proyectos_error"]),
+        ("Presupuestos", resultado["presupuestos_ok"], resultado["presupuestos_error"]),
+        ("Resumen ERP", resultado["resumen_ok"], resultado["resumen_error"]),
+    ]
+    total_ok = sum(ok for _, ok, _ in detalle)
+    total_error = sum(err for _, _, err in detalle)
+
+    if total_error == 0:
+        st.success(f"✅ {titulo}: todo OK — " + " · ".join(f"{n}: {ok}" for n, ok, _ in detalle))
+    elif total_ok == 0:
+        st.error(f"❌ {titulo}: todo con error — " + " · ".join(f"{n}: {err}" for n, _, err in detalle))
+    else:
+        st.success(f"✅ {titulo} — OK: " + " · ".join(f"{n}: {ok}" for n, ok, _ in detalle))
+        st.warning(f"⚠️ Con error: " + " · ".join(f"{n}: {err}" for n, _, err in detalle if err))
+
+    if resultado["errores"]:
+        with st.expander("Ver detalle de errores"):
+            for err in resultado["errores"]:
+                st.write(f"- {err}")
