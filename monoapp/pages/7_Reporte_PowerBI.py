@@ -13,7 +13,7 @@ st.divider()
 
 POWERBI_REPORT_URL = (
     "https://app.powerbi.com/view?"
-    "r=eyJrIjoiZTI0MjVhMmUtZGU3ZS00YWY0LTgwNzYtZmY4NjNiYzY3YzYyIiwidCI6IjBhNjYzOWQ0LTgwZmEtNGFjYy1hZDhjLTAzMWRiNmJmOWNmMyIsImMiOjR9"
+    "r=eyJrIjoiZGRhODk0ZDMtNmViMC00MWE1LTgzZjAtOWM3ODhkYTNmZjJkIiwidCI6IjBhNjYzOWQ0LTgwZmEtNGFjYy1hZDhjLTAzMWRiNmJmOWNmMyIsImMiOjR9"
 )
 
 components.iframe(POWERBI_REPORT_URL, height=650, scrolling=True)
